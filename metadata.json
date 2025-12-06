@@ -1,0 +1,5 @@
+{
+  "name": "GeoSurvey Pro",
+  "description": "A professional mobile-first technical survey tool. Sketch geometries, input real-world measurements, and automatically reconstruct metric polygons using triangulation algorithms.",
+  "requestFramePermissions": []
+}
