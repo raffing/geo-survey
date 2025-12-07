@@ -1,9 +1,9 @@
-
 import React, { createContext, useContext, useReducer, ReactNode } from 'react';
 import { AppState, Action, Polygon, EdgeType, Edge, HistoryEntry, Vertex } from '../types';
-import { solveGeometry, distance, checkConnectionStatus, alignPolygonToEdge, calculateCentroid, midPoint, calculatePolygonArea, PIXELS_PER_METER } from '../utils/geometry';
+import { solveGeometry, distance, checkConnectionStatus, alignPolygonToEdge, calculateCentroid, midPoint, calculatePolygonArea, rotatePolygon, PIXELS_PER_METER, getConnectedPolygonGroup, rotatePoint, translatePolygon } from '../utils/geometry';
 
 const initialState: AppState = {
+  theme: 'light',
   polygons: [],
   selectedPolygonId: null,
   selectedEdgeIds: [],
@@ -14,6 +14,7 @@ const initialState: AppState = {
   rotation: 0,
   isDragging: false,
   solverMsg: null,
+  isFocused: false,
   isJoinMode: false,
   joinSourceEdgeId: null,
   isDrawingMode: false,
@@ -40,6 +41,9 @@ const withHistory = (state: AppState): AppState => {
 
 const surveyReducer = (state: AppState, action: Action): AppState => {
   switch (action.type) {
+    case 'TOGGLE_THEME':
+      return { ...state, theme: state.theme === 'dark' ? 'light' : 'dark' };
+
     case 'UNDO': {
         if (state.past.length === 0) return state;
         const previous = state.past[state.past.length - 1];
@@ -78,6 +82,37 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
 
     case 'CAPTURE_SNAPSHOT': {
         return withHistory(state);
+    }
+
+    case 'IMPORT_DATA': {
+        return {
+            ...withHistory(state),
+            polygons: action.payload,
+            selectedPolygonId: null,
+            selectedEdgeIds: [],
+            selectedVertexIds: [],
+            solverMsg: { type: 'success', text: 'Data imported successfully.' }
+        };
+    }
+
+    case 'RESET_CANVAS': {
+        return {
+            ...withHistory(state),
+            polygons: [],
+            selectedPolygonId: null,
+            selectedEdgeIds: [],
+            selectedVertexIds: [],
+            openVertexMenuId: null,
+            solverMsg: { type: 'success', text: 'Canvas cleared.' },
+            panOffset: { x: 0, y: 0 },
+            zoomLevel: 1,
+            rotation: 0,
+            isDrawingMode: false,
+            drawingPoints: [],
+            isJoinMode: false,
+            joinSourceEdgeId: null,
+            isFocused: false
+        };
     }
 
     // --- DRAWING ACTIONS ---
@@ -181,20 +216,27 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
       };
 
     case 'SELECT_POLYGON': {
-      if (action.payload === state.selectedPolygonId) {
-          // If selecting the active one, we keep selections (handled in dispatch usually but here for safety)
+      const payloadId = typeof action.payload === 'object' && action.payload !== null ? action.payload.id : action.payload as string | null;
+      const shouldFocus = typeof action.payload === 'object' && action.payload !== null ? action.payload.shouldFocus : false;
+
+      if (payloadId === state.selectedPolygonId) {
+          // If explicitly requested to focus (from list), update focus state
+          if (shouldFocus && !state.isFocused) {
+              return { ...state, isFocused: true };
+          }
           return state;
       }
 
       return { 
         ...state, 
-        selectedPolygonId: action.payload,
+        selectedPolygonId: payloadId,
         selectedEdgeIds: [],
         selectedVertexIds: [],
         openVertexMenuId: null,
         isJoinMode: false,
         joinSourceEdgeId: null,
-        isDrawingMode: false // Exit drawing if selecting elsewhere
+        isDrawingMode: false, // Exit drawing if selecting elsewhere
+        isFocused: shouldFocus || false // Default to false (Context mode) unless specified
       };
     }
 
@@ -275,7 +317,6 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
         };
 
         // 2. Insert Vertex into array in correct order
-        // We need to find where vStart is in the vertices list to insert newVertex after it
         const vStartIndex = poly.vertices.findIndex(v => v.id === vStart.id);
         const newVertices = [...poly.vertices];
         newVertices.splice(vStartIndex + 1, 0, newVertex);
@@ -476,18 +517,16 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
             };
         }
 
-        // Default to 0 offset on initial join
+        // Default to 0 offset on initial join (Center Aligned)
         const offset = 0;
         const alignedSourcePoly = alignPolygonToEdge(sourcePoly, sourceEdgeId, targetPoly, targetEdgeId, offset);
         
-        const tEdge = targetPoly.edges.find(e => e.id === targetEdgeId)!;
-        
+        // Link logic: both edges know about each other
         const updatedSourcePoly = {
             ...alignedSourcePoly,
             edges: alignedSourcePoly.edges.map(e => e.id === sourceEdgeId ? { 
                 ...e, 
                 linkedEdgeId: targetEdgeId,
-                length: tEdge.length,
                 alignmentOffset: offset // Init offset
             } : e)
         };
@@ -511,9 +550,42 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
             polygons: newPolygons,
             isJoinMode: false,
             joinSourceEdgeId: null,
-            solverMsg: { type: 'success', text: 'Polygons joined. Adjust offset if needed.' },
+            solverMsg: { type: 'success', text: 'Polygons joined. Edges aligned.' },
             selectedPolygonId: updatedSourcePoly.id,
             selectedEdgeIds: [sourceEdgeId]
+        };
+    }
+    
+    case 'UNLINK_EDGE': {
+        const edgeId = action.payload;
+        const poly = state.polygons.find(p => p.edges.some(e => e.id === edgeId));
+        if (!poly) return state;
+
+        const edge = poly.edges.find(e => e.id === edgeId);
+        if (!edge || !edge.linkedEdgeId) return state;
+
+        const targetPolyId = state.polygons.find(p => p.edges.some(e => e.id === edge.linkedEdgeId))?.id;
+
+        const newPolygons = state.polygons.map(p => {
+            if (p.id === poly.id) {
+                return {
+                    ...p,
+                    edges: p.edges.map(e => e.id === edgeId ? { ...e, linkedEdgeId: undefined, alignmentOffset: undefined } : e)
+                };
+            }
+            if (p.id === targetPolyId) {
+                return {
+                    ...p,
+                    edges: p.edges.map(e => e.id === edge.linkedEdgeId ? { ...e, linkedEdgeId: undefined } : e)
+                };
+            }
+            return p;
+        });
+
+        return {
+            ...withHistory(state),
+            polygons: newPolygons,
+            solverMsg: { type: 'success', text: 'Edges unlinked.' }
         };
     }
 
@@ -630,17 +702,9 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
             };
         });
 
-        if (edge.linkedEdgeId) {
-            newPolygons = newPolygons.map(p => {
-                if (p.edges.some(e => e.id === edge.linkedEdgeId)) {
-                    return {
-                        ...p,
-                        edges: p.edges.map(e => e.id === edge.linkedEdgeId ? { ...e, length } : e)
-                    };
-                }
-                return p;
-            });
-        }
+        // If edge is linked, update connected edge length too? 
+        // User asked for "same spacing and same thickness", but length can be different.
+        // We do NOT auto-update length of linked edge, as specified "Lengths can be different".
 
         return { ...withHistory(state), polygons: newPolygons, solverMsg: null };
     }
@@ -667,6 +731,16 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
         if (targetPolyIndex === -1) return state;
 
         const poly = state.polygons[targetPolyIndex];
+
+        // Strict Check: If vertex belongs to a linked edge, prevent manual movement to preserve alignment
+        const isLinked = poly.edges.some(e => 
+            (e.startVertexId === vertexId || e.endVertexId === vertexId) && 
+            !!e.linkedEdgeId
+        );
+
+        // REMOVED STRICT CHECK TO ALLOW FREE MOVEMENT AS REQUESTED
+        // if (isLinked) { ... }
+
         const newVertices = poly.vertices.map(v => v.id === vertexId ? { ...v, x, y } : v);
         
         const newPoly = { ...poly, vertices: newVertices };
@@ -678,8 +752,63 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
             polygons: newPolygons, 
             isDragging: true, 
             solverMsg: null,
-            openVertexMenuId: null // dragging closes menu
+            openVertexMenuId: null 
         };
+    }
+
+    case 'MOVE_POLYGON': {
+        const { polygonId, dx, dy } = action.payload;
+        
+        // 1. Find the connected Group
+        // RIGID BODY GROUP MOVEMENT
+        const group = getConnectedPolygonGroup(polygonId, state.polygons);
+        
+        // 2. Move ALL connected polygons
+        const newPolygons = state.polygons.map(p => {
+            if (group.has(p.id)) {
+                return translatePolygon(p, dx, dy);
+            }
+            return p;
+        });
+
+        return {
+            ...state,
+            polygons: newPolygons,
+            isDragging: true,
+            openVertexMenuId: null
+        };
+    }
+
+    case 'ROTATE_POLYGON': {
+        const { polygonId, rotationDelta } = action.payload;
+        const mainPoly = state.polygons.find(p => p.id === polygonId);
+        if (!mainPoly) return state;
+
+        // RIGID BODY GROUP ROTATION
+        const group = getConnectedPolygonGroup(polygonId, state.polygons);
+
+        // Rotate Group around the Main Polygon's centroid
+        const center = mainPoly.centroid;
+        const newPolygons = state.polygons.map(p => {
+            if (group.has(p.id)) {
+                return rotatePolygon(p, center, rotationDelta);
+            }
+            return p;
+        });
+
+        return {
+            ...state,
+            polygons: newPolygons,
+            isDragging: true
+        };
+    }
+    
+    case 'RENAME_POLYGON': {
+        const { polygonId, name } = action.payload;
+        const newPolygons = state.polygons.map(p => 
+            p.id === polygonId ? { ...p, name } : p
+        );
+        return { ...withHistory(state), polygons: newPolygons };
     }
 
     case 'RECONSTRUCT_GEOMETRY': {
@@ -756,6 +885,9 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
         
     case 'DISMISS_MESSAGE':
         return { ...state, solverMsg: null };
+        
+    case 'SHOW_MESSAGE':
+        return { ...state, solverMsg: action.payload };
     
     case 'CLOSE_VERTEX_MENU':
         return { ...state, openVertexMenuId: null };
@@ -770,7 +902,7 @@ const SurveyContext = createContext<{
   dispatch: React.Dispatch<Action>;
 } | undefined>(undefined);
 
-export const SurveyProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
+export const SurveyProvider = ({ children }: React.PropsWithChildren<{}>) => {
   const [state, dispatch] = useReducer(surveyReducer, initialState);
   return (
     <SurveyContext.Provider value={{ state, dispatch }}>

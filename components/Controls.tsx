@@ -1,26 +1,85 @@
 
-
 import React, { useState, useRef, useEffect } from 'react';
 import { useSurvey } from '../context/SurveyContext';
-import { generateRegularPolygon, checkConnectionStatus } from '../utils/geometry';
-import { Plus, Ruler, RefreshCw, Trash2, Download, Focus, Minus, Link2, Unlink, AlertTriangle, CheckCircle, X, Layers, Check, Undo2, Redo2, Scaling, ArrowRightLeft, Square, Ban, PenTool, StopCircle, Split, PlusCircle, MoveHorizontal } from 'lucide-react';
-import { EdgeType } from '../types';
+import { generateRegularPolygon, checkConnectionStatus, generateDXF } from '../utils/geometry';
+import { Plus, Ruler, RefreshCw, Trash2, Download, Focus, Minus, Link2, Unlink, AlertTriangle, CheckCircle, X, Layers, Check, Undo2, Redo2, Scaling, ArrowRightLeft, Square, Ban, PenTool, StopCircle, Split, PlusCircle, MoveHorizontal, FileJson, FileType, Upload, FolderOpen, Sun, Moon, HelpCircle, Command, FilePlus, Pencil } from 'lucide-react';
+import { EdgeType, Polygon } from '../types';
 
-export const Controls: React.FC = () => {
+export const Controls = () => {
   const { state, dispatch } = useSurvey();
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [showLayerMenu, setShowLayerMenu] = useState(false);
+  const [showExportMenu, setShowExportMenu] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
   const [numSides, setNumSides] = useState(4);
   const [newPolyName, setNewPolyName] = useState('');
-  const [localLength, setLocalLength] = useState<string>(''); // Local state for input
+  const [localLength, setLocalLength] = useState<string>('');
+  
+  // Renaming State
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editName, setEditName] = useState('');
+
   const addMenuRef = useRef<HTMLDivElement>(null);
   const layerMenuRef = useRef<HTMLDivElement>(null);
+  const exportMenuRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   
   const selectedPoly = state.polygons.find(p => p.id === state.selectedPolygonId);
   const selectedEdges = selectedPoly?.edges.filter(e => state.selectedEdgeIds.includes(e.id)) || [];
   const selectedEdge = selectedEdges.length === 1 ? selectedEdges[0] : null; 
   
   const selectedVerticesCount = state.selectedVertexIds.length;
+
+  // Keyboard Shortcuts
+  useEffect(() => {
+      const handleKeyDown = (e: KeyboardEvent) => {
+          if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+          
+          const key = e.key.toLowerCase();
+          
+          if (key === 'a') {
+              setShowAddMenu(prev => !prev);
+              setShowLayerMenu(false);
+              setShowExportMenu(false);
+          }
+          if (key === 'l') {
+              setShowLayerMenu(prev => !prev);
+              setShowAddMenu(false);
+              setShowExportMenu(false);
+          }
+          if (key === 'd') {
+              dispatch({ type: 'START_DRAWING', payload: undefined });
+              setShowAddMenu(false);
+          }
+          if (key === 's' && selectedPoly) {
+              dispatch({ type: 'RECONSTRUCT_GEOMETRY', payload: selectedPoly.id });
+          }
+          if (key === 't') {
+              dispatch({ type: 'TOGGLE_THEME', payload: undefined });
+          }
+          if (key === 'h' || key === '?') {
+              setShowHelp(prev => !prev);
+          }
+          if (e.key === 'Escape') {
+              if (state.isDrawingMode) dispatch({ type: 'CANCEL_DRAWING', payload: undefined });
+              if (showHelp) setShowHelp(false);
+              setShowAddMenu(false);
+              setShowLayerMenu(false);
+              setShowExportMenu(false);
+              setEditingId(null);
+          }
+          if (e.key === 'Delete' || e.key === 'Backspace') {
+              if (selectedPoly && !selectedEdge && state.selectedVertexIds.length === 0 && !editingId) {
+                  dispatch({ type: 'DELETE_POLYGON', payload: selectedPoly.id });
+              }
+              if (selectedEdge && selectedEdge.type === EdgeType.DIAGONAL) {
+                  dispatch({ type: 'DELETE_EDGE', payload: selectedEdge.id });
+              }
+          }
+      };
+      window.addEventListener('keydown', handleKeyDown);
+      return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedPoly, selectedEdge, state.selectedVertexIds, state.isDrawingMode, showHelp, editingId]);
 
   // Constraint Status calculation
   const constraintStats = React.useMemo(() => {
@@ -53,14 +112,17 @@ export const Controls: React.FC = () => {
       if (layerMenuRef.current && !layerMenuRef.current.contains(event.target as Node)) {
         setShowLayerMenu(false);
       }
+      if (exportMenuRef.current && !exportMenuRef.current.contains(event.target as Node)) {
+        setShowExportMenu(false);
+      }
     };
-    if (showAddMenu || showLayerMenu) {
+    if (showAddMenu || showLayerMenu || showExportMenu) {
         document.addEventListener('mousedown', handleClickOutside);
     }
     return () => {
         document.removeEventListener('mousedown', handleClickOutside);
     };
-  }, [showAddMenu, showLayerMenu]);
+  }, [showAddMenu, showLayerMenu, showExportMenu]);
 
   useEffect(() => {
     if (showAddMenu) {
@@ -70,7 +132,6 @@ export const Controls: React.FC = () => {
 
   useEffect(() => {
       if (selectedEdge) {
-          // Convert meters to cm for display
           setLocalLength((selectedEdge.length * 100).toFixed(2));
       } else {
           setLocalLength('');
@@ -92,22 +153,56 @@ export const Controls: React.FC = () => {
       const v = selectedPoly.vertices.find(v => v.id === state.openVertexMenuId);
       if (!v) return null;
 
-      // Project vertex to screen coordinates
       const rad = state.rotation;
       const cos = Math.cos(rad);
       const sin = Math.sin(rad);
-      
       const sx = v.x * state.zoomLevel;
       const sy = v.y * state.zoomLevel;
-      
       const rx = sx * cos - sy * sin;
       const ry = sx * sin + sy * cos;
-      
       const x = rx + state.panOffset.x;
       const y = ry + state.panOffset.y;
 
       return { vertex: v, x, y };
   }, [state.openVertexMenuId, selectedPoly, state.zoomLevel, state.panOffset, state.rotation]);
+
+  // Edge Editor Position Calculation (Flying)
+  const edgeEditorPos = React.useMemo(() => {
+      if (!selectedEdge || !selectedPoly) return null;
+      const v1 = selectedPoly.vertices.find(v => v.id === selectedEdge.startVertexId);
+      const v2 = selectedPoly.vertices.find(v => v.id === selectedEdge.endVertexId);
+      if (!v1 || !v2) return null;
+
+      // Calculate midpoint in world space
+      const midX = (v1.x + v2.x) / 2;
+      const midY = (v1.y + v2.y) / 2;
+
+      // Transform to screen space
+      const rad = state.rotation;
+      const cos = Math.cos(rad);
+      const sin = Math.sin(rad);
+      const sx = midX * state.zoomLevel;
+      const sy = midY * state.zoomLevel;
+      const rx = sx * cos - sy * sin;
+      const ry = sx * sin + sy * cos;
+      const x = rx + state.panOffset.x;
+      const y = ry + state.panOffset.y;
+
+      // Clamp to viewport
+      const EDITOR_W = 260;
+      const EDITOR_H = 180;
+      
+      let safeX = x + 20; 
+      let safeY = y + 20; 
+
+      if (safeX + EDITOR_W > window.innerWidth) safeX = x - EDITOR_W - 20;
+      if (safeY + EDITOR_H > window.innerHeight) safeY = y - EDITOR_H - 20;
+
+      safeX = Math.max(10, safeX);
+      safeY = Math.max(80, safeY); 
+
+      return { x: safeX, y: safeY };
+  }, [selectedEdge, selectedPoly, state.zoomLevel, state.panOffset, state.rotation]);
 
   const handleAddPolygon = () => {
     const center = { 
@@ -125,12 +220,10 @@ export const Controls: React.FC = () => {
       setShowAddMenu(false);
   };
 
-  const handleEdgeUpdate = (val: string) => {
-    setLocalLength(val);
+  const commitEdgeUpdate = () => {
     if (!selectedEdge) return;
-    const num = parseFloat(val);
-    if (!isNaN(num) && val !== '') {
-        // Convert input cm to meters for storage
+    const num = parseFloat(localLength);
+    if (!isNaN(num) && localLength !== '') {
         dispatch({
             type: 'UPDATE_EDGE_LENGTH',
             payload: { edgeId: selectedEdge.id, length: num / 100 }
@@ -138,7 +231,13 @@ export const Controls: React.FC = () => {
     }
   };
 
-  const handleExport = () => {
+  const handleEdgeKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+      if (e.key === 'Enter') {
+          e.currentTarget.blur(); // Triggers onBlur which calls commitEdgeUpdate
+      }
+  };
+
+  const handleExportJSON = () => {
       const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(state.polygons, null, 2));
       const downloadAnchorNode = document.createElement('a');
       downloadAnchorNode.setAttribute("href",     dataStr);
@@ -146,6 +245,44 @@ export const Controls: React.FC = () => {
       document.body.appendChild(downloadAnchorNode);
       downloadAnchorNode.click();
       downloadAnchorNode.remove();
+      setShowExportMenu(false);
+  };
+
+  const handleExportDXF = () => {
+      const dxfString = generateDXF(state.polygons);
+      const dataStr = "data:text/plain;charset=utf-8," + encodeURIComponent(dxfString);
+      const downloadAnchorNode = document.createElement('a');
+      downloadAnchorNode.setAttribute("href",     dataStr);
+      downloadAnchorNode.setAttribute("download", "survey_data.dxf");
+      document.body.appendChild(downloadAnchorNode);
+      downloadAnchorNode.click();
+      downloadAnchorNode.remove();
+      setShowExportMenu(false);
+  };
+
+  const handleImportJSON = (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = (event) => {
+          try {
+              const json = JSON.parse(event.target?.result as string);
+              if (Array.isArray(json)) {
+                  const valid = json.every(p => p.id && Array.isArray(p.vertices) && Array.isArray(p.edges));
+                  if (valid) {
+                      dispatch({ type: 'IMPORT_DATA', payload: json as Polygon[] });
+                  } else {
+                      alert("Invalid JSON format");
+                  }
+              }
+          } catch (err) {
+              console.error(err);
+              alert("Failed to parse JSON");
+          }
+      };
+      reader.readAsText(file);
+      setShowExportMenu(false);
   };
 
   const handleCenterView = () => {
@@ -155,8 +292,7 @@ export const Controls: React.FC = () => {
       }
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
       let hasVertices = false;
-      const targets = selectedPoly ? [selectedPoly] : state.polygons;
-      targets.forEach(p => {
+      state.polygons.forEach(p => {
           p.vertices.forEach(v => {
               if (v.x < minX) minX = v.x;
               if (v.y < minY) minY = v.y;
@@ -186,70 +322,78 @@ export const Controls: React.FC = () => {
       dispatch({ type: 'PAN_ZOOM', payload: { x: newPanX, y: newPanY, zoom: newZoom, rotation: 0 } });
   };
 
+  const buttonClass = (isActive: boolean = false) => `p-3 rounded-xl flex flex-col items-center gap-1 min-w-[56px] transition-colors ${
+      isActive 
+      ? 'bg-brand-500 text-white' 
+      : 'bg-white/90 dark:bg-slate-700 hover:bg-slate-100 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 shadow-sm'
+  }`;
+  
+  const containerClass = "bg-slate-100/90 dark:bg-slate-800/90 backdrop-blur rounded-2xl p-1.5 shadow-xl border border-slate-200 dark:border-slate-700 flex flex-wrap justify-center items-center gap-1 sm:gap-2";
+
   return (
     <div className="absolute inset-0 pointer-events-none flex flex-col justify-between z-10">
         
         {/* Top Header Section */}
         <div className="w-full flex flex-col items-center sm:block pt-2 px-2 sm:pt-4 sm:px-4 relative pointer-events-none">
             
-            {/* Centered Toolbar - Wrapped for responsiveness without clipping */}
+            {/* Centered Toolbar */}
             <div className="pointer-events-auto relative z-20 flex flex-wrap justify-center gap-2">
                 {!state.isDrawingMode ? (
-                    <div className="bg-slate-800/90 backdrop-blur rounded-2xl p-1.5 shadow-xl border border-slate-700 flex flex-wrap justify-center items-center gap-1 sm:gap-2">
+                    <div className={containerClass}>
                         {/* Group 1: Creation & List */}
                         <div className="flex gap-1">
                             <div className="relative">
                                 <button 
-                                    onClick={() => { setShowAddMenu(!showAddMenu); setShowLayerMenu(false); }}
-                                    className={`p-3 text-white rounded-xl flex flex-col items-center gap-1 min-w-[56px] transition-colors ${showAddMenu ? 'bg-brand-500' : 'bg-brand-600 hover:bg-brand-500'}`}
+                                    onClick={() => { setShowAddMenu(!showAddMenu); setShowLayerMenu(false); setShowExportMenu(false); }}
+                                    className={buttonClass(showAddMenu)}
                                 >
                                     <Plus size={20} className={showAddMenu ? 'rotate-45 transition-transform' : 'transition-transform'}/>
                                     <span className="text-[9px] font-bold uppercase tracking-wider">Add</span>
                                 </button>
                                 {showAddMenu && (
-                                    <div ref={addMenuRef} className="fixed left-4 right-4 top-20 sm:absolute sm:top-full sm:left-0 sm:right-auto sm:w-64 mt-2 bg-slate-800 border border-slate-600 rounded-lg p-4 shadow-xl z-50 animate-in fade-in zoom-in-95 duration-200 origin-top-left">
-                                        <h3 className="text-sm font-bold text-slate-300 mb-3">New Polygon</h3>
+                                    <div ref={addMenuRef} className="fixed left-4 right-4 top-20 sm:absolute sm:top-full sm:left-0 sm:right-auto sm:w-64 mt-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-lg p-4 shadow-xl z-50 animate-in fade-in zoom-in-95 duration-200 origin-top-left text-slate-800 dark:text-slate-200">
+                                        <h3 className="text-sm font-bold mb-3">New Polygon</h3>
                                         <div className="mb-3">
                                             <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1">Name</label>
                                             <input
                                                 type="text"
                                                 value={newPolyName}
                                                 onChange={(e) => setNewPolyName(e.target.value)}
-                                                className="w-full bg-slate-900 border border-slate-700 rounded-md px-2 py-1.5 text-sm text-white focus:border-brand-500 focus:outline-none placeholder-slate-600"
+                                                className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-md px-2 py-1.5 text-sm focus:border-brand-500 focus:outline-none"
                                                 placeholder="Enter name..."
                                             />
                                         </div>
                                         <div className="grid grid-cols-2 gap-2 mb-3">
                                             <button 
                                                 onClick={handleStartDrawing}
-                                                className="bg-brand-700 hover:bg-brand-600 text-white py-2 rounded-md font-semibold text-xs shadow-sm flex items-center justify-center gap-2"
+                                                className="bg-brand-600 hover:bg-brand-500 text-white py-2 rounded-md font-semibold text-xs shadow-sm flex items-center justify-center gap-2"
                                             >
                                                 <PenTool size={14} /> Free Draw
                                             </button>
                                         </div>
-                                        <div className="border-t border-slate-700 my-3"></div>
+                                        <div className="border-t border-slate-200 dark:border-slate-700 my-3"></div>
                                         <h4 className="text-[10px] uppercase font-bold text-slate-500 mb-2">Regular Shape</h4>
-                                        <div className="flex items-center justify-between mb-4 bg-slate-900 rounded-md p-2">
+                                        <div className="flex items-center justify-between mb-4 bg-slate-100 dark:bg-slate-900 rounded-md p-2">
                                             <button 
                                                 onClick={() => setNumSides(Math.max(3, numSides - 1))}
-                                                className="p-2 bg-slate-700 rounded hover:bg-slate-600 text-slate-200"
+                                                className="p-2 bg-slate-200 dark:bg-slate-700 rounded hover:opacity-80"
                                             >
                                                 <Minus size={16} />
                                             </button>
                                             <div className="text-center">
-                                                <div className="text-xl font-bold text-brand-400">{numSides}</div>
+                                                <div className="text-xl font-bold text-brand-500 dark:text-brand-400">{numSides}</div>
                                                 <div className="text-[10px] text-slate-500 uppercase">Sides</div>
                                             </div>
                                             <button 
                                                 onClick={() => setNumSides(Math.min(12, numSides + 1))}
-                                                className="p-2 bg-slate-700 rounded hover:bg-slate-600 text-slate-200"
+                                                className="p-2 bg-slate-200 dark:bg-slate-700 rounded hover:opacity-80"
                                             >
                                                 <Plus size={16} />
                                             </button>
                                         </div>
                                         <button 
                                             onClick={handleAddPolygon}
-                                            className="w-full bg-slate-700 hover:bg-slate-600 text-slate-200 py-2 rounded-md font-semibold text-sm shadow-sm"
+                                            className="w-full bg-slate-200 dark:bg-slate-700 hover:opacity-90 py-2 rounded-md font-semibold text-sm shadow-sm"
                                         >
                                             Add Regular
                                         </button>
@@ -259,14 +403,14 @@ export const Controls: React.FC = () => {
 
                             <div className="relative">
                                 <button 
-                                    onClick={() => { setShowLayerMenu(!showLayerMenu); setShowAddMenu(false); }}
-                                    className={`p-3 text-slate-200 hover:text-white rounded-xl flex flex-col items-center gap-1 min-w-[56px] transition-colors ${showLayerMenu ? 'bg-slate-600' : 'bg-slate-700 hover:bg-slate-600'}`}
+                                    onClick={() => { setShowLayerMenu(!showLayerMenu); setShowAddMenu(false); setShowExportMenu(false); }}
+                                    className={buttonClass(showLayerMenu)}
                                 >
                                     <Layers size={20} />
                                     <span className="text-[9px] font-bold uppercase tracking-wider">List</span>
                                 </button>
                                 {showLayerMenu && (
-                                    <div ref={layerMenuRef} className="fixed left-4 right-4 top-20 sm:absolute sm:top-full sm:left-0 sm:right-auto sm:w-64 mt-2 bg-slate-800 border border-slate-600 rounded-lg p-2 shadow-xl z-50 animate-in fade-in zoom-in-95 duration-200 origin-top-left">
+                                    <div ref={layerMenuRef} className="fixed left-4 right-4 top-20 sm:absolute sm:top-full sm:left-0 sm:right-auto sm:w-64 mt-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-lg p-2 shadow-xl z-50 animate-in fade-in zoom-in-95 duration-200 origin-top-left text-slate-800 dark:text-slate-200">
                                         <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 px-2">Polygons</h3>
                                         <div className="max-h-60 overflow-y-auto space-y-1">
                                             <div 
@@ -276,16 +420,16 @@ export const Controls: React.FC = () => {
                                                 }}
                                                 className={`flex items-center gap-2 p-2 rounded cursor-pointer ${
                                                     state.selectedPolygonId === null
-                                                    ? 'bg-brand-900/50 border border-brand-500/50' 
-                                                    : 'hover:bg-slate-700 border border-transparent'
+                                                    ? 'bg-brand-100 dark:bg-brand-900/50 border border-brand-500/50' 
+                                                    : 'hover:bg-slate-100 dark:hover:bg-slate-700 border border-transparent'
                                                 }`}
                                             >
-                                                {state.selectedPolygonId === null ? <Check size={14} className="text-brand-400" /> : <div className="w-[14px]" />}
-                                                <span className={`text-sm font-medium ${state.selectedPolygonId === null ? 'text-brand-200' : 'text-slate-300'}`}>
+                                                {state.selectedPolygonId === null ? <Check size={14} className="text-brand-600 dark:text-brand-400" /> : <div className="w-[14px]" />}
+                                                <span className={`text-sm font-medium ${state.selectedPolygonId === null ? 'text-brand-700 dark:text-brand-200' : ''}`}>
                                                     Show All (Overview)
                                                 </span>
                                             </div>
-                                            <div className="h-px bg-slate-700 my-1 mx-2"></div>
+                                            <div className="h-px bg-slate-200 dark:bg-slate-700 my-1 mx-2"></div>
                                             {state.polygons.length === 0 ? (
                                                 <div className="text-slate-500 text-sm px-2 py-2 text-center">No polygons</div>
                                             ) : (
@@ -293,30 +437,67 @@ export const Controls: React.FC = () => {
                                                     <div 
                                                         key={p.id}
                                                         onClick={() => {
-                                                            dispatch({ type: 'SELECT_POLYGON', payload: p.id });
+                                                            dispatch({ type: 'SELECT_POLYGON', payload: { id: p.id, shouldFocus: true } });
                                                         }}
                                                         className={`flex items-center justify-between p-2 rounded cursor-pointer ${
                                                             p.id === state.selectedPolygonId 
-                                                            ? 'bg-brand-900/50 border border-brand-500/50' 
-                                                            : 'hover:bg-slate-700 border border-transparent'
+                                                            ? 'bg-brand-100 dark:bg-brand-900/50 border border-brand-500/50' 
+                                                            : 'hover:bg-slate-100 dark:hover:bg-slate-700 border border-transparent'
                                                         }`}
                                                     >
-                                                        <div className="flex items-center gap-2">
-                                                            {p.id === state.selectedPolygonId && <Check size={14} className="text-brand-400" />}
-                                                            <span className={`text-sm font-medium ${p.id === state.selectedPolygonId ? 'text-brand-200' : 'text-slate-300'}`}>
-                                                                {p.name}
-                                                            </span>
+                                                        <div className="flex items-center gap-2 flex-1">
+                                                            {p.id === state.selectedPolygonId && <Check size={14} className="text-brand-600 dark:text-brand-400 shrink-0" />}
+                                                            {editingId === p.id ? (
+                                                                <input 
+                                                                    autoFocus
+                                                                    type="text"
+                                                                    value={editName}
+                                                                    onChange={(e) => setEditName(e.target.value)}
+                                                                    onBlur={() => {
+                                                                        if (editName.trim()) dispatch({ type: 'RENAME_POLYGON', payload: { polygonId: p.id, name: editName.trim() }});
+                                                                        setEditingId(null);
+                                                                    }}
+                                                                    onKeyDown={(e) => {
+                                                                        if (e.key === 'Enter') {
+                                                                            if (editName.trim()) dispatch({ type: 'RENAME_POLYGON', payload: { polygonId: p.id, name: editName.trim() }});
+                                                                            setEditingId(null);
+                                                                        }
+                                                                    }}
+                                                                    onClick={(e) => e.stopPropagation()}
+                                                                    className="w-full bg-white dark:bg-slate-900 border border-brand-500 rounded px-1 py-0.5 text-xs text-slate-900 dark:text-slate-100"
+                                                                />
+                                                            ) : (
+                                                                <span className={`text-sm font-medium truncate ${p.id === state.selectedPolygonId ? 'text-brand-700 dark:text-brand-200' : ''}`}>
+                                                                    {p.name}
+                                                                </span>
+                                                            )}
                                                         </div>
-                                                        <button 
-                                                            type="button"
-                                                            onClick={(e) => {
-                                                                e.stopPropagation();
-                                                                dispatch({ type: 'DELETE_POLYGON', payload: p.id });
-                                                            }}
-                                                            className="p-2 text-slate-500 hover:text-red-400 rounded hover:bg-slate-900/50 cursor-pointer"
-                                                        >
-                                                            <Trash2 size={16} />
-                                                        </button>
+                                                        <div className="flex items-center gap-1">
+                                                            {editingId !== p.id && (
+                                                                <button
+                                                                    onClick={(e) => {
+                                                                        e.stopPropagation();
+                                                                        setEditingId(p.id);
+                                                                        setEditName(p.name);
+                                                                    }}
+                                                                    className="p-1.5 text-slate-400 hover:text-brand-500 rounded hover:bg-slate-200 dark:hover:bg-slate-900/50"
+                                                                    title="Rename"
+                                                                >
+                                                                    <Pencil size={14} />
+                                                                </button>
+                                                            )}
+                                                            <button 
+                                                                type="button"
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    dispatch({ type: 'DELETE_POLYGON', payload: p.id });
+                                                                }}
+                                                                className="p-1.5 text-slate-500 hover:text-red-500 rounded hover:bg-slate-200 dark:hover:bg-slate-900/50 cursor-pointer"
+                                                                title="Delete"
+                                                            >
+                                                                <Trash2 size={16} />
+                                                            </button>
+                                                        </div>
                                                     </div>
                                                 ))
                                             )}
@@ -326,33 +507,64 @@ export const Controls: React.FC = () => {
                             </div>
                         </div>
 
-                        <div className="w-px h-8 bg-slate-700 mx-0.5"></div>
+                        <div className="w-px h-8 bg-slate-300 dark:bg-slate-700 mx-0.5"></div>
 
                         {/* Group 2: Tools */}
                         <div className="flex gap-1">
-                            <button onClick={handleExport} className="p-3 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-xl flex flex-col items-center gap-1 min-w-[50px]">
-                                <Download size={20} /> <span className="text-[9px] font-bold uppercase tracking-wider">Exp</span>
-                            </button>
-                            <button onClick={handleCenterView} className="p-3 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-xl flex flex-col items-center gap-1 min-w-[50px]">
+                            <div className="relative">
+                                <button 
+                                    onClick={() => { setShowExportMenu(!showExportMenu); setShowAddMenu(false); setShowLayerMenu(false); }}
+                                    className={buttonClass(showExportMenu)}
+                                >
+                                    <FolderOpen size={20} /> <span className="text-[9px] font-bold uppercase tracking-wider">File</span>
+                                </button>
+                                {showExportMenu && (
+                                     <div ref={exportMenuRef} className="fixed left-4 right-4 top-20 sm:absolute sm:top-full sm:left-0 sm:right-auto sm:w-48 mt-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-lg p-2 shadow-xl z-50 animate-in fade-in zoom-in-95 duration-200 origin-top-left text-slate-800 dark:text-slate-200">
+                                         <button onClick={() => { dispatch({ type: 'RESET_CANVAS', payload: undefined }); setShowExportMenu(false); }} className="w-full flex items-center gap-2 p-2 rounded hover:bg-slate-100 dark:hover:bg-slate-700 text-sm text-red-600 dark:text-red-400">
+                                             <FilePlus size={16}/> New / Reset
+                                         </button>
+                                         <div className="h-px bg-slate-200 dark:bg-slate-700 my-1"></div>
+                                         <label className="w-full flex items-center gap-2 p-2 rounded hover:bg-slate-100 dark:hover:bg-slate-700 text-sm cursor-pointer">
+                                             <Upload size={16}/> Import JSON
+                                             <input 
+                                                 ref={fileInputRef}
+                                                 type="file" 
+                                                 accept=".json"
+                                                 className="hidden" 
+                                                 onChange={handleImportJSON}
+                                             />
+                                         </label>
+                                         <div className="h-px bg-slate-200 dark:bg-slate-700 my-1"></div>
+                                         <button onClick={handleExportJSON} className="w-full flex items-center gap-2 p-2 rounded hover:bg-slate-100 dark:hover:bg-slate-700 text-sm">
+                                             <FileJson size={16}/> Export JSON
+                                         </button>
+                                         <button onClick={handleExportDXF} className="w-full flex items-center gap-2 p-2 rounded hover:bg-slate-100 dark:hover:bg-slate-700 text-sm">
+                                             <FileType size={16}/> Export DXF
+                                         </button>
+                                     </div>
+                                )}
+                            </div>
+
+                            <button onClick={handleCenterView} className={buttonClass()}>
                                 <Focus size={20} /> <span className="text-[9px] font-bold uppercase tracking-wider">Fit</span>
                             </button>
                         </div>
 
-                        <div className="w-px h-8 bg-slate-700 mx-0.5"></div>
+                        <div className="w-px h-8 bg-slate-300 dark:bg-slate-700 mx-0.5"></div>
 
                         {/* Group 3: History */}
                         <div className="flex gap-1">
                             <button 
                                 onClick={() => dispatch({ type: 'UNDO', payload: undefined })}
                                 disabled={state.past.length === 0}
-                                className={`p-3 rounded-xl flex flex-col items-center gap-1 min-w-[50px] ${state.past.length === 0 ? 'text-slate-600 cursor-not-allowed bg-slate-800' : 'bg-slate-700 hover:bg-slate-600 text-slate-200'}`}
+                                className={`p-3 rounded-xl flex flex-col items-center gap-1 min-w-[50px] transition-colors ${state.past.length === 0 ? 'text-slate-300 dark:text-slate-600 cursor-not-allowed bg-slate-100 dark:bg-slate-800' : 'bg-white dark:bg-slate-700 hover:bg-slate-100 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200'}`}
                             >
                                 <Undo2 size={20} /> <span className="text-[9px] font-bold uppercase tracking-wider">Undo</span>
                             </button>
                             <button 
                                 onClick={() => dispatch({ type: 'REDO', payload: undefined })}
                                 disabled={state.future.length === 0}
-                                className={`p-3 rounded-xl flex flex-col items-center gap-1 min-w-[50px] ${state.future.length === 0 ? 'text-slate-600 cursor-not-allowed bg-slate-800' : 'bg-slate-700 hover:bg-slate-600 text-slate-200'}`}
+                                className={`p-3 rounded-xl flex flex-col items-center gap-1 min-w-[50px] transition-colors ${state.future.length === 0 ? 'text-slate-300 dark:text-slate-600 cursor-not-allowed bg-slate-100 dark:bg-slate-800' : 'bg-white dark:bg-slate-700 hover:bg-slate-100 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200'}`}
                             >
                                 <Redo2 size={20} /> <span className="text-[9px] font-bold uppercase tracking-wider">Redo</span>
                             </button>
@@ -389,16 +601,34 @@ export const Controls: React.FC = () => {
                 )}
             </div>
 
-            {/* Responsive Title / Status - Below toolbar on mobile, Top-Right on desktop */}
-            <div className="pointer-events-auto mt-2 sm:mt-0 sm:absolute sm:top-4 sm:right-4 z-10 flex justify-center sm:block">
-                <div className="bg-slate-800/80 backdrop-blur rounded-lg px-3 py-1.5 border border-slate-700/50 text-center shadow-lg min-w-[120px]">
-                    <h1 className="text-xs font-bold text-brand-500 uppercase tracking-wider">GeoSurvey</h1>
-                    <div className="text-[10px] text-slate-400 font-mono mt-0.5">
+            {/* Top Right Controls (Theme & Help) */}
+            <div className="pointer-events-auto absolute top-2 right-2 sm:top-4 sm:right-4 z-20 flex gap-2">
+                 <button 
+                     onClick={() => dispatch({ type: 'TOGGLE_THEME', payload: undefined })}
+                     className="p-2 bg-white/80 dark:bg-slate-800/80 backdrop-blur rounded-lg border border-slate-200 dark:border-slate-700 shadow-md text-slate-700 dark:text-slate-200 hover:bg-white dark:hover:bg-slate-700"
+                     title="Toggle Theme (T)"
+                 >
+                     {state.theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
+                 </button>
+                 <button 
+                     onClick={() => setShowHelp(true)}
+                     className="p-2 bg-white/80 dark:bg-slate-800/80 backdrop-blur rounded-lg border border-slate-200 dark:border-slate-700 shadow-md text-slate-700 dark:text-slate-200 hover:bg-white dark:hover:bg-slate-700"
+                     title="Help (?)"
+                 >
+                     <HelpCircle size={18} />
+                 </button>
+            </div>
+
+            {/* Title / Status */}
+            <div className="pointer-events-auto mt-2 sm:mt-0 sm:absolute sm:top-4 sm:left-4 z-10 flex justify-center sm:block">
+                <div className="bg-white/80 dark:bg-slate-800/80 backdrop-blur rounded-lg px-3 py-1.5 border border-slate-200 dark:border-slate-700/50 text-center shadow-lg min-w-[120px]">
+                    <h1 className="text-xs font-bold text-brand-600 dark:text-brand-500 uppercase tracking-wider">GeoSurvey</h1>
+                    <div className="text-[10px] text-slate-500 dark:text-slate-400 font-mono mt-0.5">
                         {state.isDrawingMode ? (
-                            <span className="text-brand-300 font-bold animate-pulse">DRAWING MODE ({state.drawingPoints.length} pts)</span>
+                            <span className="text-brand-500 dark:text-brand-300 font-bold animate-pulse">DRAWING MODE ({state.drawingPoints.length} pts)</span>
                         ) : (
                             state.isJoinMode ? (
-                                <span className="text-yellow-400 font-bold animate-pulse">SELECT TARGET EDGE</span>
+                                <span className="text-yellow-600 dark:text-yellow-400 font-bold animate-pulse">SELECT TARGET EDGE</span>
                             ) : (
                                 selectedPoly ? selectedPoly.name : `${state.polygons.length} Shape${state.polygons.length !== 1 ? 's' : ''}`
                             )
@@ -407,24 +637,120 @@ export const Controls: React.FC = () => {
                 </div>
             </div>
 
-            {/* Solver Message - Displayed below title/toolbar in the stack */}
+            {/* Solver Message */}
             {state.solverMsg && (
-                <div className={`pointer-events-auto mt-2 sm:absolute sm:top-20 sm:right-4 sm:mt-0 max-w-[90%] sm:max-w-xs p-3 rounded-xl shadow-2xl border flex items-start gap-3 animate-in slide-in-from-top-2 z-30 ${state.solverMsg.type === 'error' ? 'bg-red-900/95 border-red-700 text-red-100' : 'bg-green-900/95 border-green-700 text-green-100'}`}>
+                <div className={`pointer-events-auto mt-2 sm:absolute sm:top-20 sm:right-4 sm:mt-0 max-w-[90%] sm:max-w-xs p-3 rounded-xl shadow-2xl border flex items-start gap-3 animate-in slide-in-from-top-2 z-30 ${state.solverMsg.type === 'error' ? 'bg-red-50 dark:bg-red-900/95 border-red-200 dark:border-red-700 text-red-800 dark:text-red-100' : 'bg-green-50 dark:bg-green-900/95 border-green-200 dark:border-green-700 text-green-800 dark:text-green-100'}`}>
                     {state.solverMsg.type === 'error' ? <AlertTriangle size={20} className="shrink-0 mt-0.5" /> : <CheckCircle size={20} className="shrink-0 mt-0.5" />}
                     <div className="flex-1 text-xs font-medium">
                         {state.solverMsg.text}
                     </div>
-                    <button onClick={() => dispatch({ type: 'DISMISS_MESSAGE', payload: undefined })} className="p-0.5 hover:bg-white/20 rounded"><X size={14} /></button>
+                    <button onClick={() => dispatch({ type: 'DISMISS_MESSAGE', payload: undefined })} className="p-0.5 hover:bg-black/10 dark:hover:bg-white/20 rounded"><X size={14} /></button>
                 </div>
             )}
         </div>
 
+        {/* Flying Edge Editor */}
+        {!state.isJoinMode && !state.isDrawingMode && selectedEdge && edgeEditorPos && (
+             <div 
+                className="pointer-events-auto absolute z-40 bg-white/95 dark:bg-slate-800/95 backdrop-blur-md rounded-xl p-3 shadow-2xl border border-brand-500/50 animate-in zoom-in-95 flex flex-col gap-2 w-[260px] text-slate-800 dark:text-slate-100"
+                style={{ top: edgeEditorPos.y, left: edgeEditorPos.x }}
+             >
+                    <div className="flex justify-between items-center mb-1">
+                        <span className="text-brand-600 dark:text-brand-400 font-bold text-xs uppercase flex items-center gap-2">
+                            <Ruler size={14}/> Edit Edge
+                        </span>
+                        <div className="flex gap-1">
+                            {selectedEdge.type === EdgeType.PERIMETER && (
+                                <button onClick={() => dispatch({ type: 'SPLIT_EDGE', payload: selectedEdge.id })} className="text-brand-600 dark:text-brand-300 hover:bg-slate-100 dark:hover:bg-slate-700 p-1.5 rounded" title="Split">
+                                    <Split size={14} />
+                                </button>
+                            )}
+                            {selectedEdge.type === EdgeType.PERIMETER && !selectedEdge.linkedEdgeId && state.polygons.length > 1 && (
+                                <button 
+                                    onClick={() => dispatch({ type: 'START_JOIN_MODE', payload: selectedEdge.id })} 
+                                    className="text-yellow-600 dark:text-yellow-400 hover:bg-yellow-50 dark:hover:bg-yellow-900/30 p-1.5 rounded" 
+                                    title="Join"
+                                >
+                                    <ArrowRightLeft size={14} />
+                                </button>
+                            )}
+                            {selectedEdge.linkedEdgeId && (
+                                <button onClick={() => dispatch({ type: 'UNLINK_EDGE', payload: selectedEdge.id })} className="text-[10px] bg-brand-50 dark:bg-brand-900/50 text-brand-600 dark:text-brand-200 px-2 py-1 rounded border border-brand-200 dark:border-brand-700 flex items-center gap-1 hover:bg-red-50 dark:hover:bg-red-900/50 hover:text-red-500" title="Unlink">
+                                    <Unlink size={10} /> LINKED
+                                </button>
+                            )}
+                            {selectedEdge.type === EdgeType.DIAGONAL && (
+                                <button onClick={() => dispatch({ type: 'DELETE_EDGE', payload: selectedEdge.id })} className="text-red-500 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30 p-1.5 rounded" title="Delete">
+                                    <Trash2 size={14} />
+                                </button>
+                            )}
+                            <button onClick={() => dispatch({ type: 'SELECT_EDGE', payload: null })} className="text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-700 p-1.5 rounded" title="Close">
+                                <X size={14} />
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div className="flex gap-2">
+                        <input 
+                            key={selectedEdge.id}
+                            type="number" 
+                            inputMode="decimal"
+                            value={localLength}
+                            onChange={(e) => setLocalLength(e.target.value)}
+                            onBlur={commitEdgeUpdate}
+                            onKeyDown={handleEdgeKeyDown}
+                            className="flex-1 bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-lg px-2 py-2 text-lg font-mono text-slate-900 dark:text-white focus:border-brand-500 focus:outline-none"
+                            step="0.01"
+                        />
+                        <div className="flex flex-col justify-center text-slate-500 dark:text-slate-400 font-bold text-xs">cm</div>
+                    </div>
+
+                    {selectedEdge.type === EdgeType.PERIMETER && (
+                        <div className="pt-2 border-t border-slate-200 dark:border-slate-700 space-y-2">
+                                {selectedEdge.linkedEdgeId && (
+                                    <div className="bg-slate-100 dark:bg-slate-700/50 p-2 rounded-lg">
+                                        <div className="flex justify-between text-[10px] text-brand-600 dark:text-brand-300 uppercase font-bold mb-1">
+                                            <span className="flex items-center gap-1"><MoveHorizontal size={10} /> Offset</span>
+                                            <span>{(selectedEdge.alignmentOffset || 0).toFixed(2)} m</span>
+                                        </div>
+                                        <input 
+                                        type="number" 
+                                        value={selectedEdge.alignmentOffset || 0}
+                                        onChange={(e) => dispatch({ 
+                                            type: 'UPDATE_EDGE_ALIGNMENT', 
+                                            payload: { edgeId: selectedEdge.id, offset: parseFloat(e.target.value) || 0 } 
+                                        })}
+                                        className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded px-2 py-1 text-xs text-slate-900 dark:text-white"
+                                        step="0.05"
+                                        />
+                                    </div>
+                                )}
+                                <div>
+                                    <div className="flex justify-between text-[10px] text-slate-500 dark:text-slate-400 uppercase font-bold mb-1">
+                                        <span>Thickness: {(selectedEdge.thickness || 10).toFixed(0)} cm</span>
+                                    </div>
+                                    <input 
+                                    type="range" 
+                                    min="5" max="100" 
+                                    value={selectedEdge.thickness || 10}
+                                    onChange={(e) => dispatch({ 
+                                        type: 'UPDATE_EDGE_THICKNESS', 
+                                        payload: { edgeId: selectedEdge.id, thickness: parseInt(e.target.value) } 
+                                    })}
+                                    className="w-full h-1 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-brand-500"
+                                    />
+                                </div>
+                        </div>
+                    )}
+             </div>
+        )}
+
         {/* Vertex Context Menu (Popup) */}
         {vertexMenuNode && (
             <div 
-                className="pointer-events-auto absolute bg-slate-800 border border-slate-600 rounded-xl shadow-2xl p-2 z-50 flex gap-2 animate-in zoom-in-95"
+                className="pointer-events-auto absolute bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl shadow-2xl p-2 z-50 flex gap-2 animate-in zoom-in-95"
                 style={{ 
-                    top: vertexMenuNode.y - 60, // Position above vertex
+                    top: vertexMenuNode.y - 60, 
                     left: vertexMenuNode.x,
                     transform: 'translateX(-50%)' 
                 }}
@@ -434,7 +760,7 @@ export const Controls: React.FC = () => {
                          type: 'SET_VERTEX_ANGLE', 
                          payload: { vertexId: vertexMenuNode.vertex.id, angle: 90 } 
                      })}
-                     className={`px-3 py-2 rounded-lg text-xs font-bold flex items-center gap-1 ${vertexMenuNode.vertex.fixedAngle === 90 ? 'bg-amber-600 text-white' : 'bg-slate-700 text-slate-200 hover:bg-slate-600'}`}
+                     className={`px-3 py-2 rounded-lg text-xs font-bold flex items-center gap-1 ${vertexMenuNode.vertex.fixedAngle === 90 ? 'bg-amber-500 text-white' : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-600'}`}
                 >
                     <Square size={14} /> 90°
                 </button>
@@ -443,176 +769,125 @@ export const Controls: React.FC = () => {
                          type: 'SET_VERTEX_ANGLE', 
                          payload: { vertexId: vertexMenuNode.vertex.id, angle: undefined } 
                      })}
-                     className={`px-3 py-2 rounded-lg text-xs font-bold flex items-center gap-1 ${vertexMenuNode.vertex.fixedAngle === undefined ? 'bg-brand-600 text-white' : 'bg-slate-700 text-slate-200 hover:bg-slate-600'}`}
+                     className={`px-3 py-2 rounded-lg text-xs font-bold flex items-center gap-1 ${vertexMenuNode.vertex.fixedAngle === undefined ? 'bg-brand-600 text-white' : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-600'}`}
                 >
                     <Ban size={14} /> Free
                 </button>
-                <div className="w-px bg-slate-600 mx-1"></div>
+                <div className="w-px bg-slate-200 dark:bg-slate-600 mx-1"></div>
                 <button 
                      onClick={() => dispatch({ 
                          type: 'DELETE_VERTEX', 
                          payload: vertexMenuNode.vertex.id 
                      })}
-                     className="px-3 py-2 bg-red-900/50 text-red-300 hover:bg-red-900/80 rounded-lg text-xs font-bold flex items-center gap-1"
+                     className="px-3 py-2 bg-red-100 dark:bg-red-900/50 text-red-600 dark:text-red-300 hover:bg-red-200 dark:hover:bg-red-900/80 rounded-lg text-xs font-bold flex items-center gap-1"
                 >
-                    <Trash2 size={14} />
+                    <Trash2 size={14} /> Delete
                 </button>
-                <div className="w-px bg-slate-600 mx-1"></div>
+            </div>
+        )}
+
+        {/* Bottom Footer Bar (Always Visible) */}
+        <div className="pointer-events-auto w-full bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 p-2 sm:p-4 flex justify-between items-center z-20">
+             <div className="flex items-center gap-2">
+                 <div className={`px-2 py-1 rounded border text-xs font-mono ${state.isJoinMode ? 'bg-yellow-100 border-yellow-300 text-yellow-700' : 'bg-slate-100 dark:bg-slate-800 border-slate-300 dark:border-slate-700 text-slate-500 dark:text-slate-400'}`}>
+                     <span className="font-bold">⊙ {state.polygons.length}/{state.polygons.length}</span>
+                 </div>
+             </div>
+             
+             <button
+                 onClick={() => {
+                     if (selectedPoly) dispatch({ type: 'RECONSTRUCT_GEOMETRY', payload: selectedPoly.id });
+                 }}
+                 disabled={!selectedPoly} // Visually disabled but always present
+                 className={`px-6 py-2 rounded-lg font-bold shadow-lg flex items-center gap-2 transition-all ${
+                     selectedPoly 
+                     ? 'bg-brand-600 hover:bg-brand-500 text-white shadow-brand-500/30' 
+                     : 'bg-slate-200 dark:bg-slate-800 text-slate-400 cursor-not-allowed'
+                 }`}
+             >
+                 <RefreshCw size={18} className={state.solverMsg ? "" : "animate-none"} />
+                 SOLVE
+             </button>
+        </div>
+
+        {/* Transform Toolbar (Rotate/Move) - Show when polygon selected */}
+        {!state.isJoinMode && !state.isDrawingMode && selectedPoly && (
+            <div className="pointer-events-auto absolute bottom-20 left-1/2 -translate-x-1/2 bg-white/90 dark:bg-slate-800/90 backdrop-blur rounded-full px-4 py-2 shadow-xl border border-slate-200 dark:border-slate-700 flex gap-4 animate-in slide-in-from-bottom-4 z-30">
                 <button 
-                     onClick={() => dispatch({ type: 'CLOSE_VERTEX_MENU', payload: undefined })}
-                     className="p-2 text-slate-400 hover:bg-slate-700 rounded-lg"
+                    onClick={() => dispatch({ type: 'ROTATE_POLYGON', payload: { polygonId: selectedPoly.id, rotationDelta: -Math.PI / 4 } })}
+                    className="p-2 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-full text-slate-600 dark:text-slate-300"
+                    title="Rotate -45°"
                 >
-                    <X size={14} />
+                    <RefreshCw size={16} className="-scale-x-100" />
                 </button>
-                
-                {/* Little triangle arrow pointing down */}
-                <div className="absolute top-full left-1/2 -ml-2 -mt-px w-4 h-4 overflow-hidden">
-                    <div className="w-3 h-3 bg-slate-800 border-r border-b border-slate-600 rotate-45 transform origin-top-left translate-x-1/2"></div>
+                 <div className="w-px bg-slate-300 dark:bg-slate-600"></div>
+                 <div className="flex flex-col items-center justify-center">
+                     <span className="text-[10px] font-bold text-slate-400 uppercase">Transform</span>
+                 </div>
+                 <div className="w-px bg-slate-300 dark:bg-slate-600"></div>
+                <button 
+                    onClick={() => dispatch({ type: 'ROTATE_POLYGON', payload: { polygonId: selectedPoly.id, rotationDelta: Math.PI / 4 } })}
+                    className="p-2 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-full text-slate-600 dark:text-slate-300"
+                    title="Rotate +45°"
+                >
+                    <RefreshCw size={16} />
+                </button>
+            </div>
+        )}
+
+        {/* Help Modal */}
+        {showHelp && (
+            <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4 pointer-events-auto">
+                <div className="bg-white dark:bg-slate-900 w-full max-w-md rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 overflow-hidden animate-in zoom-in-95">
+                    <div className="p-4 border-b border-slate-100 dark:border-slate-800 flex justify-between items-center bg-slate-50/50 dark:bg-slate-800/50">
+                        <h2 className="text-lg font-bold flex items-center gap-2 text-slate-800 dark:text-slate-100">
+                            <HelpCircle size={20} className="text-brand-500"/> User Guide
+                        </h2>
+                        <button onClick={() => setShowHelp(false)} className="p-1 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-full text-slate-500">
+                            <X size={20} />
+                        </button>
+                    </div>
+                    <div className="p-6 text-sm space-y-4 max-h-[60vh] overflow-y-auto text-slate-600 dark:text-slate-300">
+                        
+                        <div>
+                            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Shortcuts</h3>
+                            <div className="grid grid-cols-2 gap-2">
+                                <div className="flex justify-between bg-slate-100 dark:bg-slate-800 p-2 rounded">
+                                    <span>Add Polygon</span> <kbd className="font-mono bg-white dark:bg-slate-700 px-1 rounded border border-slate-200 dark:border-slate-600 text-xs">A</kbd>
+                                </div>
+                                <div className="flex justify-between bg-slate-100 dark:bg-slate-800 p-2 rounded">
+                                    <span>List View</span> <kbd className="font-mono bg-white dark:bg-slate-700 px-1 rounded border border-slate-200 dark:border-slate-600 text-xs">L</kbd>
+                                </div>
+                                <div className="flex justify-between bg-slate-100 dark:bg-slate-800 p-2 rounded">
+                                    <span>Free Draw</span> <kbd className="font-mono bg-white dark:bg-slate-700 px-1 rounded border border-slate-200 dark:border-slate-600 text-xs">D</kbd>
+                                </div>
+                                <div className="flex justify-between bg-slate-100 dark:bg-slate-800 p-2 rounded">
+                                    <span>Solve Geometry</span> <kbd className="font-mono bg-white dark:bg-slate-700 px-1 rounded border border-slate-200 dark:border-slate-600 text-xs">S</kbd>
+                                </div>
+                                <div className="flex justify-between bg-slate-100 dark:bg-slate-800 p-2 rounded">
+                                    <span>Toggle Theme</span> <kbd className="font-mono bg-white dark:bg-slate-700 px-1 rounded border border-slate-200 dark:border-slate-600 text-xs">T</kbd>
+                                </div>
+                                <div className="flex justify-between bg-slate-100 dark:bg-slate-800 p-2 rounded">
+                                    <span>Delete Selected</span> <kbd className="font-mono bg-white dark:bg-slate-700 px-1 rounded border border-slate-200 dark:border-slate-600 text-xs">Del</kbd>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div>
+                            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Workflow</h3>
+                            <ul className="space-y-2 list-disc list-inside">
+                                <li><strong>Add Shapes:</strong> Use the "Add" menu to create regular polygons or sketch freely.</li>
+                                <li><strong>Edit Measures:</strong> Tap any edge to input real-world measurements freely.</li>
+                                <li><strong>Triangulate:</strong> Add diagonal connections between vertices to rigidify the shape.</li>
+                                <li><strong>Solve:</strong> Press "Solve" to reconstruct the geometry based on your measurements.</li>
+                                <li><strong>Join:</strong> Snap and align a polygon to another (Polygons remain independent).</li>
+                            </ul>
+                        </div>
+                    </div>
                 </div>
             </div>
         )}
 
-        {/* Drawing Mode Hint */}
-        {state.isDrawingMode && (
-             <div className="pointer-events-none absolute bottom-8 left-1/2 -translate-x-1/2 bg-slate-800/80 backdrop-blur px-4 py-2 rounded-full text-xs text-brand-200 font-bold shadow-xl border border-brand-500/30 w-max max-w-[90%] text-center">
-                 Tap to add points. Tap the start point to close.
-             </div>
-        )}
-
-        <div className="pointer-events-auto p-4 space-y-3 flex flex-col justify-end">
-            
-            {state.isJoinMode && (
-                <div className="bg-yellow-900/80 backdrop-blur border border-yellow-600/50 p-4 rounded-xl text-center shadow-2xl animate-in slide-in-from-bottom-5">
-                    <p className="text-yellow-100 font-bold mb-2">Select an edge on another polygon to join.</p>
-                    <button onClick={() => dispatch({ type: 'SELECT_POLYGON', payload: selectedPoly?.id || null })} className="bg-slate-800 hover:bg-slate-700 text-white px-6 py-2 rounded-lg font-bold">CANCEL</button>
-                </div>
-            )}
-
-            {!state.isJoinMode && !state.isDrawingMode && selectedVerticesCount === 2 && canConnect && (
-                 <div className="flex justify-end animate-in slide-in-from-bottom-5">
-                    <button onClick={() => dispatch({ type: 'ADD_DIAGONAL', payload: undefined })} className="bg-brand-600 hover:bg-brand-500 text-white px-6 py-3 rounded-xl font-bold shadow-lg flex items-center gap-2">
-                        <Link2 size={20} /> CONNECT
-                    </button>
-                 </div>
-            )}
-
-            {/* Edge Editor */}
-            {!state.isJoinMode && !state.isDrawingMode && selectedEdge && (
-                <div className="bg-slate-800/95 backdrop-blur-md rounded-xl p-4 shadow-xl border border-brand-500/50 animate-in slide-in-from-bottom-5 space-y-3">
-                    <div className="flex justify-between items-center mb-1">
-                        <span className="text-brand-400 font-bold text-sm uppercase flex items-center gap-2">
-                            <Ruler size={16}/> Measure Input
-                        </span>
-                        <div className="flex gap-2">
-                            {selectedEdge.type === EdgeType.PERIMETER && (
-                                <button onClick={() => dispatch({ type: 'SPLIT_EDGE', payload: selectedEdge.id })} className="text-brand-300 hover:text-white p-2 bg-slate-700 hover:bg-slate-600 rounded flex items-center gap-1 text-xs font-bold" title="Add Node">
-                                    <PlusCircle size={14} /> SPLIT
-                                </button>
-                            )}
-                            {selectedEdge.type === EdgeType.PERIMETER && state.polygons.length > 1 && !selectedEdge.linkedEdgeId && (
-                                <button onClick={() => dispatch({ type: 'START_JOIN_MODE', payload: selectedEdge.id })} className="text-yellow-400 hover:text-yellow-300 p-2 bg-yellow-900/30 rounded flex items-center gap-1 text-xs font-bold" title="Join Polygons">
-                                    <ArrowRightLeft size={14} /> JOIN
-                                </button>
-                            )}
-                            {selectedEdge.linkedEdgeId && (
-                                <div className="text-[10px] bg-brand-900/50 text-brand-200 px-2 py-1 rounded border border-brand-700 flex items-center gap-1">
-                                    <Link2 size={10} /> LINKED
-                                </div>
-                            )}
-                            {selectedEdge.type === EdgeType.DIAGONAL && (
-                                <button onClick={() => dispatch({ type: 'DELETE_EDGE', payload: selectedEdge.id })} className="text-red-400 hover:text-red-300 p-2 bg-red-900/30 rounded" title="Delete Diagonal">
-                                    <Unlink size={16} />
-                                </button>
-                            )}
-                        </div>
-                    </div>
-                    
-                    <div className="flex gap-2">
-                        <input 
-                            type="number" 
-                            value={localLength}
-                            onChange={(e) => handleEdgeUpdate(e.target.value)}
-                            className="flex-1 bg-slate-900 border border-slate-600 rounded-lg px-4 py-3 text-xl font-mono text-white focus:border-brand-500 focus:outline-none"
-                            step="0.01"
-                        />
-                        <div className="flex flex-col justify-center text-slate-400 font-bold text-sm px-2">cm</div>
-                    </div>
-
-                    {selectedEdge.type === EdgeType.PERIMETER && (
-                        <div className="pt-2 border-t border-slate-700 space-y-3">
-                             
-                             {selectedEdge.linkedEdgeId && (
-                                 <div className="bg-slate-700/50 p-2 rounded-lg">
-                                     <div className="flex justify-between text-[10px] text-brand-300 uppercase font-bold mb-1">
-                                        <span className="flex items-center gap-1"><MoveHorizontal size={10} /> Alignment Offset</span>
-                                        <span>{(selectedEdge.alignmentOffset || 0).toFixed(2)} m</span>
-                                     </div>
-                                     <input 
-                                        type="number" 
-                                        value={selectedEdge.alignmentOffset || 0}
-                                        onChange={(e) => dispatch({ 
-                                            type: 'UPDATE_EDGE_ALIGNMENT', 
-                                            payload: { edgeId: selectedEdge.id, offset: parseFloat(e.target.value) || 0 } 
-                                        })}
-                                        className="w-full bg-slate-900 border border-slate-600 rounded px-2 py-1 text-xs text-white"
-                                        step="0.05"
-                                     />
-                                 </div>
-                             )}
-
-                             <div>
-                                 <div className="flex justify-between text-[10px] text-slate-400 uppercase font-bold mb-1">
-                                    <span>Wall Thickness</span>
-                                    <span>{(selectedEdge.thickness || 10).toFixed(0)} cm</span>
-                                 </div>
-                                 <input 
-                                    type="range" 
-                                    min="5" max="100" 
-                                    value={selectedEdge.thickness || 10}
-                                    onChange={(e) => dispatch({ 
-                                        type: 'UPDATE_EDGE_THICKNESS', 
-                                        payload: { edgeId: selectedEdge.id, thickness: parseInt(e.target.value) } 
-                                    })}
-                                    className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-brand-500"
-                                 />
-                             </div>
-                        </div>
-                    )}
-                </div>
-            )}
-            
-            {!state.isDrawingMode && !state.isJoinMode && selectedPoly && (
-                <div className="flex gap-2 justify-end">
-                    {/* Constraints Badge */}
-                    {constraintStats && (
-                         <div className={`flex items-center gap-1 px-3 py-2 rounded-xl border text-xs font-bold uppercase shadow-sm ${
-                             constraintStats.current > constraintStats.needed 
-                             ? 'bg-blue-900/50 border-blue-500 text-blue-200'
-                             : (constraintStats.current === constraintStats.needed 
-                                ? 'bg-green-900/50 border-green-500 text-green-200' 
-                                : 'bg-amber-900/50 border-amber-500 text-amber-200')
-                         }`}>
-                             <StopCircle size={14} />
-                             {constraintStats.current}/{constraintStats.needed}
-                         </div>
-                    )}
-
-                    <button 
-                        onClick={() => dispatch({ type: 'RECONSTRUCT_GEOMETRY', payload: selectedPoly.id })}
-                        className="bg-green-600 hover:bg-green-500 text-white px-6 py-4 rounded-xl font-bold shadow-lg flex items-center gap-2 flex-1 justify-center active:scale-95 transition-transform"
-                    >
-                        <RefreshCw size={20} />
-                        SOLVE
-                    </button>
-                </div>
-            )}
-            
-            {!state.isDrawingMode && !selectedPoly && state.polygons.length === 0 && (
-                <div className="text-center p-4 bg-slate-800/50 rounded-xl text-slate-400 text-sm">
-                    Tap "Add" to start a new survey sketch.
-                </div>
-            )}
-        </div>
     </div>
   );
 };

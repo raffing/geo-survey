@@ -30,6 +30,37 @@ export const rotatePoint = (p: Point, center: Point, angle: number): Point => {
     };
 };
 
+// --- Group Logic (Graph Traversal) ---
+
+/**
+ * Returns a Set of Polygon IDs that are connected to the startPolyId
+ * via linked edges (recursively).
+ */
+export const getConnectedPolygonGroup = (startPolyId: string, allPolygons: Polygon[]): Set<string> => {
+    const group = new Set<string>();
+    const queue = [startPolyId];
+    group.add(startPolyId);
+
+    while (queue.length > 0) {
+        const currentId = queue.shift()!;
+        const currentPoly = allPolygons.find(p => p.id === currentId);
+        if (!currentPoly) continue;
+
+        // Find all linked edges in this polygon
+        currentPoly.edges.forEach(edge => {
+            if (edge.linkedEdgeId) {
+                // Find the polygon that contains the linked edge
+                const neighbor = allPolygons.find(p => p.edges.some(e => e.id === edge.linkedEdgeId));
+                if (neighbor && !group.has(neighbor.id)) {
+                    group.add(neighbor.id);
+                    queue.push(neighbor.id);
+                }
+            }
+        });
+    }
+    return group;
+};
+
 // --- Transformation Logic ---
 
 export const rotatePolygon = (poly: Polygon, center: Point, angle: number): Polygon => {
@@ -85,56 +116,48 @@ export const alignPolygonToEdge = (
     const angleSource = Math.atan2(sV2.y - sV1.y, sV2.x - sV1.x);
     const angleTarget = Math.atan2(tV2.y - tV1.y, tV2.x - tV1.x);
 
-    // 3. Determine Best Rotation (0 or 180 flip)
-    const options = [
-        { angleDiff: angleTarget - angleSource }, // Same direction
-        { angleDiff: angleTarget - angleSource + Math.PI } // Opposed direction
-    ];
+    // 3. Determine Best Rotation (Flip logic)
+    // We strictly want them anti-parallel (facing each other) for walls
+    // Vector Source must be opposite to Vector Target
+    const targetOpposite = angleTarget + Math.PI;
+    const angleDiff = targetOpposite - angleSource;
 
-    let bestPoly = sourcePoly;
-    let bestDist = -1;
+    // A. Rotate Source around its centroid
+    const rotated = rotatePolygon(sourcePoly, sourcePoly.centroid, angleDiff);
+    
+    // B. Get rotated source start vertex
+    const rV1 = rotated.vertices.find(v => v.id === sV1.id)!;
+    const rV2 = rotated.vertices.find(v => v.id === sV2.id)!;
+    
+    // C. Calculate Target Anchor Point
+    // We align the line (rV1 -> rV2) onto the line (tV1 -> tV2)
+    // Anchor: We want rV1 (or rV2) to lie on the line.
+    
+    // Vector of Target Edge (Unit vector)
+    const tLen = distance(tV1, tV2);
+    const ux = (tV2.x - tV1.x) / tLen;
+    const uy = (tV2.y - tV1.y) / tLen;
 
-    for (const opt of options) {
-        // A. Rotate Source around its centroid
-        const rotated = rotatePolygon(sourcePoly, sourcePoly.centroid, opt.angleDiff);
-        
-        // B. Get rotated source start vertex
-        const rV1 = rotated.vertices.find(v => v.id === sV1.id)!;
-        
-        // C. Calculate Target Anchor Point
-        // We want sV1 to lie on the line defined by tV1 -> tV2.
-        // Anchor is tV1.
-        
-        // D. Calculate Vector of Target Edge (Unit vector)
-        const tLen = distance(tV1, tV2);
-        const ux = (tV2.x - tV1.x) / tLen;
-        const uy = (tV2.y - tV1.y) / tLen;
+    // D. Calculate Translation to snap Start-to-End (Standard Join)
+    // Usually we snap rV1 to tV2 (Start of source to End of target for continuous flow) 
+    // OR rV1 to tV1 if we want them side-by-side. 
+    // Given the 'offset', let's base it on tV1 as origin.
+    
+    const pxPerMeter = tEdge.length > 0 ? tLen / tEdge.length : PIXELS_PER_METER;
+    const offsetPx = offset * pxPerMeter;
 
-        // E. Target Position for rV1
-        // Offset is in meters, we need to convert to pixels based on the target edge geometry.
-        // tLen (pixels) / tEdge.length (meters) gives pixels per meter.
-        // Note: This relies on the target edge having a consistent scale.
-        const pxPerMeter = tEdge.length > 0 ? tLen / tEdge.length : PIXELS_PER_METER;
-        const offsetPx = offset * pxPerMeter;
+    const targetX = tV1.x + ux * offsetPx;
+    const targetY = tV1.y + uy * offsetPx;
 
-        const targetX = tV1.x + ux * offsetPx;
-        const targetY = tV1.y + uy * offsetPx;
-
-        // F. Translate
-        const dx = targetX - rV1.x;
-        const dy = targetY - rV1.y;
-        
-        const candidate = translatePolygon(rotated, dx, dy);
-        
-        const dist = distance(candidate.centroid, targetPoly.centroid);
-        
-        if (dist > bestDist) {
-            bestDist = dist;
-            bestPoly = candidate;
-        }
-    }
-
-    return bestPoly;
+    // E. Translate
+    // Note: Due to rotation, rV1 might not be the 'start' visually anymore, but logically it is.
+    // If we want rV2 (end of source edge) to align with tV1 (start of target edge), we'd translate rV2 to target.
+    // Let's assume rV1 aligns with tV1 + offset.
+    
+    const dx = targetX - rV1.x;
+    const dy = targetY - rV1.y;
+    
+    return translatePolygon(rotated, dx, dy);
 };
 
 // --- Intersection Logic (for validation) ---
@@ -208,12 +231,9 @@ export const findIntersection = (
 ): { type: 'success', point: Point, approximated?: boolean } | { type: 'error', code: 'SEPARATED' | 'CONTAINED' } => {
   const d = distance(p1, p2);
 
-  // Case 0: Infinite solutions or Concentric
   if (d === 0) return { type: 'error', code: 'CONTAINED' };
 
-  // Case 1: Separated (Triangle Inequality Violation: d > r1 + r2)
   if (d > r1 + r2) {
-      // If the gap is within tolerance, snap to the weighted midpoint
       if (d <= r1 + r2 + EPSILON) {
           const ratio = r1 / (r1 + r2);
           const x = p1.x + (p2.x - p1.x) * ratio;
@@ -223,11 +243,8 @@ export const findIntersection = (
       return { type: 'error', code: 'SEPARATED' }; 
   }
 
-  // Case 2: Contained (Triangle Inequality Violation: d < |r1 - r2|)
   if (d < Math.abs(r1 - r2)) {
-       // If the overlap is within tolerance, snap to the closest point on the larger circle
        if (d >= Math.abs(r1 - r2) - EPSILON) {
-            // The closest point is on the line connecting centers, extending from the larger circle
             const rMax = Math.max(r1, r2);
             let x, y;
             if (r1 > r2) {
@@ -242,7 +259,6 @@ export const findIntersection = (
        return { type: 'error', code: 'CONTAINED' };
   }
 
-  // Normal intersection (2 points)
   const a = (r1 * r1 - r2 * r2 + d * d) / (2 * d);
   const h = Math.sqrt(Math.max(0, r1 * r1 - a * a));
 
@@ -259,15 +275,12 @@ export const findIntersection = (
     y: y2 + (h * (p2.x - p1.x)) / d,
   };
 
-  // Choose the intersection closest to the current (draft) position of P3
   const dist1 = distance(intersection1, originalP3);
   const dist2 = distance(intersection2, originalP3);
 
   return { type: 'success', point: dist1 < dist2 ? intersection1 : intersection2 };
 };
 
-// Calculates the length of the opposite side using Law of Cosines
-// c^2 = a^2 + b^2 - 2ab * cos(gamma)
 export const calculateSASDistance = (lenA: number, lenB: number, angleDeg: number): number => {
     const angleRad = (angleDeg * Math.PI) / 180;
     const cSq = Math.pow(lenA, 2) + Math.pow(lenB, 2) - 2 * lenA * lenB * Math.cos(angleRad);
@@ -282,7 +295,6 @@ export const calculatePolygonArea = (vertices: Vertex[]): number => {
         area += vertices[i].x * vertices[j].y;
         area -= vertices[j].x * vertices[i].y;
     }
-    // Calculate area in 'pixel squared' space, then convert to meters squared
     const areaPx = Math.abs(area) / 2;
     return areaPx / (PIXELS_PER_METER * PIXELS_PER_METER);
 };
@@ -292,7 +304,6 @@ export const solveGeometry = (polygon: Polygon): { polygon: Polygon, metricError
   let effectiveEdges = [...polygon.edges];
   let isApproximated = false;
 
-  // --- PRE-PROCESSING: Constraint Injection ---
   vertices.forEach(v => {
       if (v.fixedAngle !== undefined) {
           const connected = polygon.edges.filter(e => 
@@ -306,7 +317,6 @@ export const solveGeometry = (polygon: Polygon): { polygon: Polygon, metricError
               const n1Id = e1.startVertexId === v.id ? e1.endVertexId : e1.startVertexId;
               const n2Id = e2.startVertexId === v.id ? e2.endVertexId : e2.startVertexId;
 
-              // e1.length and e2.length are in meters. virtualLen will be in meters.
               const virtualLen = calculateSASDistance(e1.length, e2.length, v.fixedAngle);
               
               effectiveEdges = effectiveEdges.filter(e => 
@@ -334,7 +344,6 @@ export const solveGeometry = (polygon: Polygon): { polygon: Polygon, metricError
   const vertexMap = new Map<string, Vertex>();
   vertices.forEach(v => vertexMap.set(v.id, v));
 
-  // 1. Find Baseline
   let v0: Vertex | undefined, v1: Vertex | undefined;
   let startEdge: Edge | undefined;
 
@@ -357,7 +366,6 @@ export const solveGeometry = (polygon: Polygon): { polygon: Polygon, metricError
   solved.add(v1.id);
 
   const currentAngle = Math.atan2(v1.y - v0.y, v1.x - v0.x);
-  // Scale meters to pixels for coordinate placement
   const scaledStartLength = startEdge.length * PIXELS_PER_METER;
 
   const newV1 = {
@@ -368,7 +376,6 @@ export const solveGeometry = (polygon: Polygon): { polygon: Polygon, metricError
   vertexMap.set(v1.id, newV1);
   vertices = vertices.map(v => v.id === v1.id ? newV1 : v);
 
-  // 2. Propagation
   let progress = true;
   let metricError: string | undefined = undefined;
 
@@ -389,7 +396,6 @@ export const solveGeometry = (polygon: Polygon): { polygon: Polygon, metricError
         if (solved.has(neighborId)) {
           solvedNeighbors.push({
             vertex: vertexMap.get(neighborId)!,
-            // Scale meters to pixels for intersection calculation
             edgeLen: edge.length * PIXELS_PER_METER
           });
         }
@@ -417,7 +423,7 @@ export const solveGeometry = (polygon: Polygon): { polygon: Polygon, metricError
           solved.add(vTarget.id);
           progress = true; 
         } else {
-             metricError = `Measurement Error: Edges do not meet at Vertex ${vTarget.label}. Check lengths connected to ${anchor1.vertex.label} and ${anchor2.vertex.label}.`;
+             metricError = `Measurement Error: Edges do not meet at Vertex ${vTarget.label}.`;
         }
       }
     }
@@ -448,9 +454,10 @@ export const generateRegularPolygon = (
   const radius = 150;
   const vertices: Vertex[] = [];
   const validSides = Math.max(3, sides);
-  
+  const startAngle = validSides === 4 ? -Math.PI / 4 : -Math.PI / 2;
+
   for (let i = 0; i < validSides; i++) {
-    const angle = (i * 2 * Math.PI) / validSides - Math.PI / 2; 
+    const angle = startAngle + (i * 2 * Math.PI) / validSides; 
     vertices.push({
       id: `${idBase}-v${i}`,
       x: center.x + radius * Math.cos(angle),
@@ -472,7 +479,6 @@ export const generateRegularPolygon = (
       id: `${idBase}-e-p${i}`,
       startVertexId: v1.id,
       endVertexId: v2.id,
-      // Convert initial pixel length to meters for storage
       length: parseFloat((len / PIXELS_PER_METER).toFixed(2)),
       type: EdgeType.PERIMETER,
       thickness: 10 
@@ -489,7 +495,6 @@ export const generateRegularPolygon = (
               id: `${idBase}-e-d${i}`,
               startVertexId: vStart.id,
               endVertexId: vEnd.id,
-              // Convert initial pixel length to meters for storage
               length: parseFloat((len / PIXELS_PER_METER).toFixed(2)),
               type: EdgeType.DIAGONAL
           });
@@ -504,4 +509,36 @@ export const generateRegularPolygon = (
     centroid: calculateCentroid(vertices),
     isClosed: true
   };
+};
+
+export const generateDXF = (polygons: Polygon[]): string => {
+    let dxf = "0\nSECTION\n2\nENTITIES\n";
+    
+    polygons.forEach(poly => {
+        poly.edges.forEach(edge => {
+            const v1 = poly.vertices.find(v => v.id === edge.startVertexId);
+            const v2 = poly.vertices.find(v => v.id === edge.endVertexId);
+            if (v1 && v2) {
+                const layer = edge.type === EdgeType.PERIMETER ? "WALLS" : "DIAGONALS";
+                const color = edge.type === EdgeType.PERIMETER ? "7" : "252"; 
+                
+                dxf += "0\nLINE\n8\n" + layer + "\n62\n" + color + "\n";
+                dxf += "10\n" + (v1.x / PIXELS_PER_METER).toFixed(4) + "\n"; 
+                dxf += "20\n" + (-v1.y / PIXELS_PER_METER).toFixed(4) + "\n"; 
+                dxf += "11\n" + (v2.x / PIXELS_PER_METER).toFixed(4) + "\n"; 
+                dxf += "21\n" + (-v2.y / PIXELS_PER_METER).toFixed(4) + "\n"; 
+            }
+        });
+
+        poly.vertices.forEach(v => {
+             dxf += "0\nTEXT\n8\nLABELS\n62\n3\n"; 
+             dxf += "10\n" + (v.x / PIXELS_PER_METER).toFixed(4) + "\n";
+             dxf += "20\n" + (-v.y / PIXELS_PER_METER).toFixed(4) + "\n";
+             dxf += "40\n0.2\n"; 
+             dxf += "1\n" + v.label + "\n";
+        });
+    });
+
+    dxf += "0\nENDSEC\n0\nEOF\n";
+    return dxf;
 };

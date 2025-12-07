@@ -49,6 +49,7 @@ export interface HistoryEntry {
 }
 
 export interface AppState {
+  theme: 'light' | 'dark'; // New theme state
   polygons: Polygon[];
   selectedPolygonId: string | null;
   selectedEdgeIds: string[]; 
@@ -59,6 +60,7 @@ export interface AppState {
   rotation: number; // in radians
   isDragging: boolean;
   solverMsg: { type: 'success' | 'error'; text: string } | null;
+  isFocused: boolean;
   
   // Interaction Modes
   isJoinMode: boolean; 
@@ -74,8 +76,9 @@ export interface AppState {
 }
 
 export type Action =
+  | { type: 'TOGGLE_THEME'; payload: void }
   | { type: 'ADD_POLYGON'; payload: Polygon }
-  | { type: 'SELECT_POLYGON'; payload: string | null }
+  | { type: 'SELECT_POLYGON'; payload: string | null | { id: string | null; shouldFocus?: boolean } }
   | { type: 'SELECT_EDGE'; payload: string | null | { edgeId: string; multi: boolean } }
   | { type: 'SPLIT_EDGE'; payload: string }
   | { type: 'TOGGLE_VERTEX_SELECTION'; payload: string } 
@@ -85,14 +88,19 @@ export type Action =
   | { type: 'DELETE_VERTEX'; payload: string }
   | { type: 'ADD_DIAGONAL'; payload: void } 
   | { type: 'DELETE_EDGE'; payload: string } 
+  | { type: 'UNLINK_EDGE'; payload: string }
   | { type: 'UPDATE_EDGE_LENGTH'; payload: { edgeId: string; length: number } }
   | { type: 'UPDATE_EDGE_THICKNESS'; payload: { edgeId: string; thickness: number } }
   | { type: 'UPDATE_EDGE_ALIGNMENT'; payload: { edgeId: string; offset: number } }
   | { type: 'MOVE_VERTEX'; payload: { vertexId: string; x: number; y: number } }
+  | { type: 'MOVE_POLYGON'; payload: { polygonId: string; dx: number; dy: number } }
+  | { type: 'ROTATE_POLYGON'; payload: { polygonId: string; rotationDelta: number } }
+  | { type: 'RENAME_POLYGON'; payload: { polygonId: string; name: string } }
   | { type: 'RECONSTRUCT_GEOMETRY'; payload: string }
   | { type: 'PAN_ZOOM'; payload: { x: number; y: number; zoom: number; rotation: number } }
   | { type: 'DELETE_POLYGON'; payload: string }
   | { type: 'DISMISS_MESSAGE'; payload: void }
+  | { type: 'SHOW_MESSAGE'; payload: { type: 'success' | 'error'; text: string } }
   | { type: 'UNDO'; payload: void }
   | { type: 'REDO'; payload: void }
   | { type: 'CAPTURE_SNAPSHOT'; payload: void }
@@ -102,4 +110,6 @@ export type Action =
   | { type: 'ADD_DRAWING_POINT'; payload: Point }
   | { type: 'UNDO_DRAWING_POINT'; payload: void }
   | { type: 'CANCEL_DRAWING'; payload: void }
-  | { type: 'FINISH_DRAWING'; payload: string }; // Payload is the name of the polygon
+  | { type: 'FINISH_DRAWING'; payload: string }
+  | { type: 'IMPORT_DATA'; payload: Polygon[] }
+  | { type: 'RESET_CANVAS'; payload: void };
