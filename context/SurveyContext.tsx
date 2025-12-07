@@ -1,3 +1,4 @@
+
 import React, { createContext, useContext, useReducer, ReactNode } from 'react';
 import { AppState, Action, Polygon, EdgeType, Edge, HistoryEntry, Vertex } from '../types';
 import { solveGeometry, distance, checkConnectionStatus, alignPolygonToEdge, calculateCentroid, midPoint, calculatePolygonArea, rotatePolygon, PIXELS_PER_METER, getConnectedPolygonGroup, rotatePoint, translatePolygon } from '../utils/geometry';
@@ -760,12 +761,12 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
         const { polygonId, dx, dy } = action.payload;
         
         // 1. Find the connected Group
-        // RIGID BODY GROUP MOVEMENT
-        const group = getConnectedPolygonGroup(polygonId, state.polygons);
+        // REMOVED GROUP TRAVERSAL - Independent Movement
+        // const group = getConnectedPolygonGroup(polygonId, state.polygons);
         
-        // 2. Move ALL connected polygons
+        // 2. Move ONLY selected polygon
         const newPolygons = state.polygons.map(p => {
-            if (group.has(p.id)) {
+            if (p.id === polygonId) {
                 return translatePolygon(p, dx, dy);
             }
             return p;
@@ -784,13 +785,12 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
         const mainPoly = state.polygons.find(p => p.id === polygonId);
         if (!mainPoly) return state;
 
-        // RIGID BODY GROUP ROTATION
-        const group = getConnectedPolygonGroup(polygonId, state.polygons);
+        // REMOVED GROUP TRAVERSAL - Independent Rotation
 
-        // Rotate Group around the Main Polygon's centroid
+        // Rotate Main Polygon around its OWN centroid
         const center = mainPoly.centroid;
         const newPolygons = state.polygons.map(p => {
-            if (group.has(p.id)) {
+            if (p.id === polygonId) {
                 return rotatePolygon(p, center, rotationDelta);
             }
             return p;
@@ -902,7 +902,7 @@ const SurveyContext = createContext<{
   dispatch: React.Dispatch<Action>;
 } | undefined>(undefined);
 
-export const SurveyProvider = ({ children }: React.PropsWithChildren<{}>) => {
+export const SurveyProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [state, dispatch] = useReducer(surveyReducer, initialState);
   return (
     <SurveyContext.Provider value={{ state, dispatch }}>

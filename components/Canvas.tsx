@@ -13,7 +13,7 @@ const rotatePoint = (p: {x: number, y: number}, angle: number) => {
     };
 };
 
-export const Canvas = () => {
+export const Canvas: React.FC = () => {
   const { state, dispatch } = useSurvey();
   const svgRef = useRef<SVGSVGElement>(null);
   const groupRef = useRef<SVGGElement>(null);
@@ -467,25 +467,15 @@ export const Canvas = () => {
                         const isDiagonal = edge.type === EdgeType.DIAGONAL;
                         const isJoined = !!edge.linkedEdgeId;
 
-                        const isSourceEdge = state.isJoinMode && edge.id === state.joinSourceEdgeId;
-                        const isTargetCandidate = state.isJoinMode && 
-                            isPerimeter && 
-                            state.joinSourceEdgeId && 
-                            state.polygons.find(p => p.edges.some(e => e.id === state.joinSourceEdgeId))?.id !== poly.id;
-
                         const strokeColor = isEdgeSelected 
                             ? '#38bdf8' 
-                            : (isSourceEdge
-                                ? '#f59e0b' // Amber
-                                : (isTargetCandidate
-                                    ? '#eab308' // Yellow
-                                    : (isJoined 
-                                        ? '#a855f7' // Purple-500
-                                        : (isConnectedToSelected 
-                                            ? '#7dd3fc' 
-                                            : (isDiagonal 
-                                                ? (state.theme === 'dark' ? '#475569' : '#94a3b8') 
-                                                : (state.theme === 'dark' ? '#94a3b8' : '#64748b'))))));
+                            : (isJoined 
+                                ? '#a855f7' // Purple-500
+                                : (isConnectedToSelected 
+                                    ? '#7dd3fc' 
+                                    : (isDiagonal 
+                                        ? (state.theme === 'dark' ? '#475569' : '#94a3b8') 
+                                        : (state.theme === 'dark' ? '#94a3b8' : '#64748b'))));
                         
                         const baseStroke = isPerimeter ? 3 : 1.5;
                         const strokeWidth = (isEdgeSelected ? 5 : baseStroke) / state.zoomLevel;
@@ -505,7 +495,7 @@ export const Canvas = () => {
                                    interactionTypeRef.current = 'edge';
                                    dispatch({ type: 'SELECT_EDGE', payload: edge.id });
                                }}
-                               className={state.isDrawingMode ? '' : (isTargetCandidate ? 'cursor-alias' : 'cursor-pointer')}
+                               className={state.isDrawingMode ? '' : 'cursor-pointer'}
                             >
                                 {/* Hit Area */}
                                 <line
@@ -522,10 +512,9 @@ export const Canvas = () => {
                                     x2={end.x} y2={end.y}
                                     stroke={strokeColor}
                                     strokeWidth={strokeWidth}
-                                    strokeDasharray={isDiagonal || isTargetCandidate ? "5,5" : "0"}
+                                    strokeDasharray={isDiagonal ? "5,5" : "0"}
                                     strokeLinecap="round"
                                     pointerEvents="none"
-                                    className={isTargetCandidate ? "animate-pulse" : ""}
                                 />
                                 
                                 <g transform={`rotate(${-rotationDeg}, ${midX}, ${midY})`} pointerEvents="none">
@@ -535,7 +524,7 @@ export const Canvas = () => {
                                         width={showThickness ? 52 : 44} 
                                         height={showThickness ? 36 : 24} 
                                         rx="4"
-                                        fill={isEdgeSelected ? '#0ea5e9' : (isSourceEdge ? '#f59e0b' : (isJoined ? '#7e22ce' : (isConnectedToSelected ? '#334155' : (state.theme === 'dark' ? '#1e293b' : '#f1f5f9'))))} 
+                                        fill={isEdgeSelected ? '#0ea5e9' : (isJoined ? '#7e22ce' : (isConnectedToSelected ? '#334155' : (state.theme === 'dark' ? '#1e293b' : '#f1f5f9')))} 
                                         opacity="0.95"
                                         stroke={isEdgeSelected ? 'white' : (isJoined ? '#d8b4fe' : (state.theme === 'light' ? '#cbd5e1' : 'none'))}
                                         strokeWidth={1}
@@ -545,7 +534,7 @@ export const Canvas = () => {
                                         y={midY}
                                         dy={showThickness ? "-0.3em" : "0.3em"}
                                         textAnchor="middle"
-                                        fill={state.theme === 'dark' || isEdgeSelected || isJoined || isConnectedToSelected || isSourceEdge ? "white" : "#0f172a"}
+                                        fill={state.theme === 'dark' || isEdgeSelected || isJoined || isConnectedToSelected ? "white" : "#0f172a"}
                                         fontSize={12}
                                         fontWeight="bold"
                                     >

@@ -5,7 +5,7 @@ import { generateRegularPolygon, checkConnectionStatus, generateDXF } from '../u
 import { Plus, Ruler, RefreshCw, Trash2, Download, Focus, Minus, Link2, Unlink, AlertTriangle, CheckCircle, X, Layers, Check, Undo2, Redo2, Scaling, ArrowRightLeft, Square, Ban, PenTool, StopCircle, Split, PlusCircle, MoveHorizontal, FileJson, FileType, Upload, FolderOpen, Sun, Moon, HelpCircle, Command, FilePlus, Pencil } from 'lucide-react';
 import { EdgeType, Polygon } from '../types';
 
-export const Controls = () => {
+export const Controls: React.FC = () => {
   const { state, dispatch } = useSurvey();
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [showLayerMenu, setShowLayerMenu] = useState(false);
@@ -667,9 +667,9 @@ export const Controls = () => {
                             )}
                             {selectedEdge.type === EdgeType.PERIMETER && !selectedEdge.linkedEdgeId && state.polygons.length > 1 && (
                                 <button 
-                                    onClick={() => dispatch({ type: 'START_JOIN_MODE', payload: selectedEdge.id })} 
+                                    onClick={() => dispatch({ type: 'SHOW_MESSAGE', payload: { type: 'success', text: 'Future Implementation' } })} 
                                     className="text-yellow-600 dark:text-yellow-400 hover:bg-yellow-50 dark:hover:bg-yellow-900/30 p-1.5 rounded" 
-                                    title="Join"
+                                    title="Join (Future)"
                                 >
                                     <ArrowRightLeft size={14} />
                                 </button>
@@ -781,113 +781,127 @@ export const Controls = () => {
                      })}
                      className="px-3 py-2 bg-red-100 dark:bg-red-900/50 text-red-600 dark:text-red-300 hover:bg-red-200 dark:hover:bg-red-900/80 rounded-lg text-xs font-bold flex items-center gap-1"
                 >
-                    <Trash2 size={14} /> Delete
+                    <Trash2 size={14} />
                 </button>
+                <div className="w-px bg-slate-200 dark:bg-slate-600 mx-1"></div>
+                <button 
+                     onClick={() => dispatch({ type: 'CLOSE_VERTEX_MENU', payload: undefined })}
+                     className="p-2 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg"
+                >
+                    <X size={14} />
+                </button>
+                
+                <div className="absolute top-full left-1/2 -ml-2 -mt-px w-4 h-4 overflow-hidden">
+                    <div className="w-3 h-3 bg-white dark:bg-slate-800 border-r border-b border-slate-200 dark:border-slate-600 rotate-45 transform origin-top-left translate-x-1/2"></div>
+                </div>
             </div>
         )}
 
-        {/* Bottom Footer Bar (Always Visible) */}
-        <div className="pointer-events-auto w-full bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 p-2 sm:p-4 flex justify-between items-center z-20">
-             <div className="flex items-center gap-2">
-                 <div className={`px-2 py-1 rounded border text-xs font-mono ${state.isJoinMode ? 'bg-yellow-100 border-yellow-300 text-yellow-700' : 'bg-slate-100 dark:bg-slate-800 border-slate-300 dark:border-slate-700 text-slate-500 dark:text-slate-400'}`}>
-                     <span className="font-bold">⊙ {state.polygons.length}/{state.polygons.length}</span>
-                 </div>
-             </div>
-             
-             <button
-                 onClick={() => {
-                     if (selectedPoly) dispatch({ type: 'RECONSTRUCT_GEOMETRY', payload: selectedPoly.id });
-                 }}
-                 disabled={!selectedPoly} // Visually disabled but always present
-                 className={`px-6 py-2 rounded-lg font-bold shadow-lg flex items-center gap-2 transition-all ${
-                     selectedPoly 
-                     ? 'bg-brand-600 hover:bg-brand-500 text-white shadow-brand-500/30' 
-                     : 'bg-slate-200 dark:bg-slate-800 text-slate-400 cursor-not-allowed'
-                 }`}
-             >
-                 <RefreshCw size={18} className={state.solverMsg ? "" : "animate-none"} />
-                 SOLVE
-             </button>
-        </div>
-
-        {/* Transform Toolbar (Rotate/Move) - Show when polygon selected */}
-        {!state.isJoinMode && !state.isDrawingMode && selectedPoly && (
-            <div className="pointer-events-auto absolute bottom-20 left-1/2 -translate-x-1/2 bg-white/90 dark:bg-slate-800/90 backdrop-blur rounded-full px-4 py-2 shadow-xl border border-slate-200 dark:border-slate-700 flex gap-4 animate-in slide-in-from-bottom-4 z-30">
-                <button 
-                    onClick={() => dispatch({ type: 'ROTATE_POLYGON', payload: { polygonId: selectedPoly.id, rotationDelta: -Math.PI / 4 } })}
-                    className="p-2 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-full text-slate-600 dark:text-slate-300"
-                    title="Rotate -45°"
-                >
-                    <RefreshCw size={16} className="-scale-x-100" />
-                </button>
-                 <div className="w-px bg-slate-300 dark:bg-slate-600"></div>
-                 <div className="flex flex-col items-center justify-center">
-                     <span className="text-[10px] font-bold text-slate-400 uppercase">Transform</span>
-                 </div>
-                 <div className="w-px bg-slate-300 dark:bg-slate-600"></div>
-                <button 
-                    onClick={() => dispatch({ type: 'ROTATE_POLYGON', payload: { polygonId: selectedPoly.id, rotationDelta: Math.PI / 4 } })}
-                    className="p-2 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-full text-slate-600 dark:text-slate-300"
-                    title="Rotate +45°"
-                >
-                    <RefreshCw size={16} />
-                </button>
-            </div>
-        )}
-
-        {/* Help Modal */}
+        {/* HELP MODAL */}
         {showHelp && (
-            <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4 pointer-events-auto">
-                <div className="bg-white dark:bg-slate-900 w-full max-w-md rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 overflow-hidden animate-in zoom-in-95">
-                    <div className="p-4 border-b border-slate-100 dark:border-slate-800 flex justify-between items-center bg-slate-50/50 dark:bg-slate-800/50">
-                        <h2 className="text-lg font-bold flex items-center gap-2 text-slate-800 dark:text-slate-100">
+            <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 pointer-events-auto">
+                <div className="absolute inset-0 bg-slate-900/50 backdrop-blur-sm" onClick={() => setShowHelp(false)}></div>
+                <div className="relative bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-md w-full max-h-[80vh] overflow-y-auto flex flex-col border border-slate-200 dark:border-slate-700">
+                    <div className="flex items-center justify-between p-4 border-b border-slate-200 dark:border-slate-700">
+                        <h2 className="text-lg font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2">
                             <HelpCircle size={20} className="text-brand-500"/> User Guide
                         </h2>
-                        <button onClick={() => setShowHelp(false)} className="p-1 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-full text-slate-500">
-                            <X size={20} />
+                        <button onClick={() => setShowHelp(false)} className="p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-full text-slate-500">
+                            <X size={20}/>
                         </button>
                     </div>
-                    <div className="p-6 text-sm space-y-4 max-h-[60vh] overflow-y-auto text-slate-600 dark:text-slate-300">
-                        
-                        <div>
-                            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Shortcuts</h3>
+                    <div className="p-6 space-y-6 text-slate-600 dark:text-slate-300 text-sm">
+                        <section>
+                            <h3 className="font-bold text-slate-900 dark:text-white mb-2 uppercase text-xs tracking-wider">Shortcuts</h3>
                             <div className="grid grid-cols-2 gap-2">
-                                <div className="flex justify-between bg-slate-100 dark:bg-slate-800 p-2 rounded">
-                                    <span>Add Polygon</span> <kbd className="font-mono bg-white dark:bg-slate-700 px-1 rounded border border-slate-200 dark:border-slate-600 text-xs">A</kbd>
-                                </div>
-                                <div className="flex justify-between bg-slate-100 dark:bg-slate-800 p-2 rounded">
-                                    <span>List View</span> <kbd className="font-mono bg-white dark:bg-slate-700 px-1 rounded border border-slate-200 dark:border-slate-600 text-xs">L</kbd>
-                                </div>
-                                <div className="flex justify-between bg-slate-100 dark:bg-slate-800 p-2 rounded">
-                                    <span>Free Draw</span> <kbd className="font-mono bg-white dark:bg-slate-700 px-1 rounded border border-slate-200 dark:border-slate-600 text-xs">D</kbd>
-                                </div>
-                                <div className="flex justify-between bg-slate-100 dark:bg-slate-800 p-2 rounded">
-                                    <span>Solve Geometry</span> <kbd className="font-mono bg-white dark:bg-slate-700 px-1 rounded border border-slate-200 dark:border-slate-600 text-xs">S</kbd>
-                                </div>
-                                <div className="flex justify-between bg-slate-100 dark:bg-slate-800 p-2 rounded">
-                                    <span>Toggle Theme</span> <kbd className="font-mono bg-white dark:bg-slate-700 px-1 rounded border border-slate-200 dark:border-slate-600 text-xs">T</kbd>
-                                </div>
-                                <div className="flex justify-between bg-slate-100 dark:bg-slate-800 p-2 rounded">
-                                    <span>Delete Selected</span> <kbd className="font-mono bg-white dark:bg-slate-700 px-1 rounded border border-slate-200 dark:border-slate-600 text-xs">Del</kbd>
-                                </div>
+                                <div className="flex justify-between p-2 bg-slate-50 dark:bg-slate-700/50 rounded"><span>Add Polygon</span> <kbd className="font-mono bg-slate-200 dark:bg-slate-600 px-1 rounded">A</kbd></div>
+                                <div className="flex justify-between p-2 bg-slate-50 dark:bg-slate-700/50 rounded"><span>List View</span> <kbd className="font-mono bg-slate-200 dark:bg-slate-600 px-1 rounded">L</kbd></div>
+                                <div className="flex justify-between p-2 bg-slate-50 dark:bg-slate-700/50 rounded"><span>Free Draw</span> <kbd className="font-mono bg-slate-200 dark:bg-slate-600 px-1 rounded">D</kbd></div>
+                                <div className="flex justify-between p-2 bg-slate-50 dark:bg-slate-700/50 rounded"><span>Solve Geometry</span> <kbd className="font-mono bg-slate-200 dark:bg-slate-600 px-1 rounded">S</kbd></div>
+                                <div className="flex justify-between p-2 bg-slate-50 dark:bg-slate-700/50 rounded"><span>Toggle Theme</span> <kbd className="font-mono bg-slate-200 dark:bg-slate-600 px-1 rounded">T</kbd></div>
+                                <div className="flex justify-between p-2 bg-slate-50 dark:bg-slate-700/50 rounded"><span>Delete Selected</span> <kbd className="font-mono bg-slate-200 dark:bg-slate-600 px-1 rounded">Del</kbd></div>
                             </div>
-                        </div>
-
-                        <div>
-                            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Workflow</h3>
-                            <ul className="space-y-2 list-disc list-inside">
+                        </section>
+                        
+                        <section>
+                            <h3 className="font-bold text-slate-900 dark:text-white mb-2 uppercase text-xs tracking-wider">Workflow</h3>
+                            <ul className="list-disc pl-4 space-y-1">
                                 <li><strong>Add Shapes:</strong> Use the "Add" menu to create regular polygons or sketch freely.</li>
                                 <li><strong>Edit Measures:</strong> Tap any edge to input real-world measurements freely.</li>
                                 <li><strong>Triangulate:</strong> Add diagonal connections between vertices to rigidify the shape.</li>
                                 <li><strong>Solve:</strong> Press "Solve" to reconstruct the geometry based on your measurements.</li>
                                 <li><strong>Join:</strong> Snap and align a polygon to another (Polygons remain independent).</li>
                             </ul>
-                        </div>
+                        </section>
                     </div>
                 </div>
             </div>
         )}
 
+        {/* Drawing Mode Hint */}
+        {state.isDrawingMode && (
+             <div className="pointer-events-none absolute bottom-8 left-1/2 -translate-x-1/2 bg-slate-800/80 backdrop-blur px-4 py-2 rounded-full text-xs text-brand-200 font-bold shadow-xl border border-brand-500/30 w-max max-w-[90%] text-center">
+                 Tap to add points. Tap the start point to close.
+             </div>
+        )}
+
+        {/* BOTTOM SECTION */}
+        <div className="pointer-events-auto w-full p-4 flex flex-col justify-end space-y-3 sm:max-w-md sm:ml-auto sm:mr-4">
+            
+            {state.isJoinMode && (
+                <div className="bg-yellow-100 dark:bg-yellow-900/80 backdrop-blur border border-yellow-300 dark:border-yellow-600/50 p-4 rounded-xl text-center shadow-2xl animate-in slide-in-from-bottom-5">
+                    <p className="text-yellow-800 dark:text-yellow-100 font-bold mb-2">Select an edge on another polygon to join.</p>
+                    <button onClick={() => dispatch({ type: 'SELECT_POLYGON', payload: selectedPoly?.id || null })} className="bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-900 dark:text-white px-6 py-2 rounded-lg font-bold border border-slate-200 dark:border-slate-600">CANCEL</button>
+                </div>
+            )}
+
+            {!state.isJoinMode && !state.isDrawingMode && selectedVerticesCount === 2 && canConnect && (
+                 <div className="flex justify-end animate-in slide-in-from-bottom-5">
+                    <button onClick={() => dispatch({ type: 'ADD_DIAGONAL', payload: undefined })} className="bg-brand-600 hover:bg-brand-500 text-white px-6 py-3 rounded-xl font-bold shadow-lg flex items-center gap-2">
+                        <Link2 size={20} /> CONNECT
+                    </button>
+                 </div>
+            )}
+            
+            {/* SOLVE BUTTON AREA - ALWAYS VISIBLE */}
+            {!state.isDrawingMode && !state.isJoinMode && (
+                <div className="flex gap-2 justify-end">
+                    {/* Constraints Badge (Only if selected) */}
+                    {selectedPoly && constraintStats && (
+                         <div className={`flex items-center gap-1 px-3 py-2 rounded-xl border text-xs font-bold uppercase shadow-sm ${
+                             constraintStats.current > constraintStats.needed 
+                             ? 'bg-blue-100 dark:bg-blue-900/50 border-blue-500 text-blue-800 dark:text-blue-200'
+                             : (constraintStats.current === constraintStats.needed 
+                                ? 'bg-green-100 dark:bg-green-900/50 border-green-500 text-green-800 dark:text-green-200' 
+                                : 'bg-amber-100 dark:bg-amber-900/50 border-amber-500 text-amber-800 dark:text-amber-200')
+                         }`}>
+                             <StopCircle size={14} />
+                             {constraintStats.current}/{constraintStats.needed}
+                         </div>
+                    )}
+
+                    <button 
+                        onClick={() => selectedPoly && dispatch({ type: 'RECONSTRUCT_GEOMETRY', payload: selectedPoly.id })}
+                        disabled={!selectedPoly}
+                        className={`px-6 py-4 rounded-xl font-bold shadow-lg flex items-center gap-2 flex-1 justify-center transition-transform ${
+                            selectedPoly 
+                            ? 'bg-green-600 hover:bg-green-500 text-white active:scale-95 cursor-pointer' 
+                            : 'bg-white dark:bg-slate-700 text-slate-400 dark:text-slate-500 cursor-not-allowed border border-slate-200 dark:border-slate-600'
+                        }`}
+                        title="Solve (S)"
+                    >
+                        <RefreshCw size={20} />
+                        SOLVE
+                    </button>
+                </div>
+            )}
+            
+            {!state.isDrawingMode && !selectedPoly && state.polygons.length === 0 && (
+                <div className="text-center p-4 bg-white/50 dark:bg-slate-800/50 rounded-xl text-slate-500 dark:text-slate-400 text-sm">
+                    Tap "Add" to start a new survey sketch.
+                </div>
+            )}
+        </div>
     </div>
   );
 };
