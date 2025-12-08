@@ -1,4 +1,3 @@
-
 import React, { createContext, useContext, useReducer, ReactNode } from 'react';
 import { AppState, Action, Polygon, EdgeType, Edge, HistoryEntry, Vertex } from '../types';
 import { solveGeometry, distance, checkConnectionStatus, alignPolygonToEdge, calculateCentroid, midPoint, calculatePolygonArea, rotatePolygon, PIXELS_PER_METER, rotatePoint, translatePolygon, recalculateGroups, getConnectedPolygonGroup, duplicatePolygon, mirrorPolygon, calculateAlignmentTransform, calculateProjectedOffset } from '../utils/geometry';
@@ -1092,19 +1091,35 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
     case 'MOVE_POLYGON': {
         const { polygonId, dx, dy } = action.payload;
         
-        const mainPoly = state.polygons.find(p => p.id === polygonId);
-        if (!mainPoly) return state;
-
-        // Group Logic: If polygon has a groupId, move all polygons in that group
-        const movingGroup = mainPoly.groupId;
+        // Determine the set of unique Polygon IDs to move
+        const idsToMove = new Set<string>();
         
-        const newPolygons = state.polygons.map(p => {
-            if (p.id === polygonId || (movingGroup && p.groupId === movingGroup)) {
-                return translatePolygon(p, dx, dy);
+        // 1. The dragged polygon always moves
+        idsToMove.add(polygonId);
+        
+        // 2. If the dragged polygon is selected, then ALL selected polygons move.
+        if (state.selectedPolygonIds.includes(polygonId)) {
+            state.selectedPolygonIds.forEach(id => idsToMove.add(id));
+        }
+        
+        // 3. Expand to include rigid body groups for ALL moving polygons
+        const involvedGroupIds = new Set<string>();
+        state.polygons.forEach(p => {
+            if (idsToMove.has(p.id) && p.groupId) {
+                involvedGroupIds.add(p.groupId);
             }
-            // Also move other selected polygons if they are not part of the group (Multi-move)
-            if (state.selectedPolygonIds.includes(p.id) && !movingGroup) {
-                 return translatePolygon(p, dx, dy);
+        });
+        
+        // Add all members of these groups
+        state.polygons.forEach(p => {
+            if (p.groupId && involvedGroupIds.has(p.groupId)) {
+                idsToMove.add(p.id);
+            }
+        });
+
+        const newPolygons = state.polygons.map(p => {
+            if (idsToMove.has(p.id)) {
+                return translatePolygon(p, dx, dy);
             }
             return p;
         });
