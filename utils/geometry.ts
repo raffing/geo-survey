@@ -1,4 +1,5 @@
 
+
 import { Point, Vertex, Edge, EdgeType, Polygon } from '../types';
 
 export const PIXELS_PER_METER = 100;
@@ -30,13 +31,30 @@ export const rotatePoint = (p: Point, center: Point, angle: number): Point => {
     };
 };
 
+/**
+ * Calculates the Signed Area of the polygon.
+ * In Screen Coordinates (Y-Down):
+ * Area > 0 implies Clockwise (CW) winding.
+ * Area < 0 implies Counter-Clockwise (CCW) winding.
+ */
+export const getPolygonSignedArea = (vertices: Vertex[]): number => {
+    let area = 0;
+    for (let i = 0; i < vertices.length; i++) {
+        const j = (i + 1) % vertices.length;
+        area += (vertices[i].x * vertices[j].y);
+        area -= (vertices[j].x * vertices[i].y);
+    }
+    return area / 2;
+};
+
 // --- Group Logic (Graph Traversal) ---
 
 /**
  * Returns a Set of Polygon IDs that are connected to the startPolyId
  * via linked edges (recursively).
+ * Optional excludePolyId to block traversal (useful for finding a subgraph connected to one side of a link).
  */
-export const getConnectedPolygonGroup = (startPolyId: string, allPolygons: Polygon[]): Set<string> => {
+export const getConnectedPolygonGroup = (startPolyId: string, allPolygons: Polygon[], excludePolyId?: string): Set<string> => {
     const group = new Set<string>();
     const queue = [startPolyId];
     group.add(startPolyId);
@@ -51,7 +69,7 @@ export const getConnectedPolygonGroup = (startPolyId: string, allPolygons: Polyg
             if (edge.linkedEdgeId) {
                 // Find the polygon that contains the linked edge
                 const neighbor = allPolygons.find(p => p.edges.some(e => e.id === edge.linkedEdgeId));
-                if (neighbor && !group.has(neighbor.id)) {
+                if (neighbor && neighbor.id !== excludePolyId && !group.has(neighbor.id)) {
                     group.add(neighbor.id);
                     queue.push(neighbor.id);
                 }
@@ -60,6 +78,46 @@ export const getConnectedPolygonGroup = (startPolyId: string, allPolygons: Polyg
     }
     return group;
 };
+
+/**
+ * Recalculates groups for all polygons in the provided list.
+ * Should be called after unlinking or removing polygons.
+ * Returns the updated list of polygons.
+ */
+export const recalculateGroups = (polygons: Polygon[]): Polygon[] => {
+    const visited = new Set<string>();
+    const newPolygons = [...polygons];
+    
+    // We iterate through all polygons. If not visited, start a BFS/DFS to find component.
+    for (const poly of newPolygons) {
+        if (visited.has(poly.id)) continue;
+
+        const component = getConnectedPolygonGroup(poly.id, newPolygons);
+        
+        // Mark all in component as visited
+        component.forEach(id => visited.add(id));
+
+        // If component size > 1, assign a new group ID. If size == 1, remove group ID.
+        if (component.size > 1) {
+            const newGroupId = `group-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+            component.forEach(id => {
+                const pIndex = newPolygons.findIndex(p => p.id === id);
+                if (pIndex !== -1) {
+                    newPolygons[pIndex] = { ...newPolygons[pIndex], groupId: newGroupId };
+                }
+            });
+        } else {
+            // Singleton
+            const pIndex = newPolygons.findIndex(p => p.id === poly.id);
+            if (pIndex !== -1) {
+                newPolygons[pIndex] = { ...newPolygons[pIndex], groupId: undefined };
+            }
+        }
+    }
+    
+    return newPolygons;
+};
+
 
 // --- Transformation Logic ---
 
@@ -90,72 +148,91 @@ export const translatePolygon = (poly: Polygon, dx: number, dy: number): Polygon
 
 /**
  * Aligns 'sourcePoly' to 'targetPoly' along their respective edges.
- * supports 'offset' (in pixels/units) to slide the source along the target vector.
+ * 
+ * Logic:
+ * 1. Identify winding order (CW/CCW) of both polygons to find "Inside" direction.
+ * 2. Rotate Source so its edge is parallel/anti-parallel to Target edge such that
+ *    the "Insides" face away from each other.
+ * 3. Translate Source so edges align (Centered) + Offset + Thickness Gap.
  */
 export const alignPolygonToEdge = (
     sourcePoly: Polygon, 
     sourceEdgeId: string, 
     targetPoly: Polygon, 
     targetEdgeId: string,
-    offset: number = 0
+    offset: number = 0, // Linear sliding offset from center
+    perpendicularDist: number = 0 // Thickness spacing (Meters)
 ): Polygon => {
     // 1. Get Coordinates
     const sEdge = sourcePoly.edges.find(e => e.id === sourceEdgeId);
     const tEdge = targetPoly.edges.find(e => e.id === targetEdgeId);
     if (!sEdge || !tEdge) return sourcePoly;
 
-    // We align sV1 (start of source) relative to tV1 (start of target)
     const sV1 = sourcePoly.vertices.find(v => v.id === sEdge.startVertexId)!;
     const sV2 = sourcePoly.vertices.find(v => v.id === sEdge.endVertexId)!;
     
-    // Target vector details
     const tV1 = targetPoly.vertices.find(v => v.id === tEdge.startVertexId)!;
     const tV2 = targetPoly.vertices.find(v => v.id === tEdge.endVertexId)!;
 
-    // 2. Calculate Angles
+    // 2. Winding & Normals
+    const sArea = getPolygonSignedArea(sourcePoly.vertices);
+    const tArea = getPolygonSignedArea(targetPoly.vertices);
+    const sIsCW = sArea > 0;
+    const tIsCW = tArea > 0;
+
+    // Edge Angles
     const angleSource = Math.atan2(sV2.y - sV1.y, sV2.x - sV1.x);
     const angleTarget = Math.atan2(tV2.y - tV1.y, tV2.x - tV1.x);
 
-    // 3. Determine Best Rotation (Flip logic)
-    // We strictly want them anti-parallel (facing each other) for walls
-    // Vector Source must be opposite to Vector Target
-    const targetOpposite = angleTarget + Math.PI;
-    const angleDiff = targetOpposite - angleSource;
+    // Calculate Inward Normal Angle (relative to edge vector)
+    // CW: Normal is +90 deg. CCW: Normal is -90 deg.
+    const sNormalAngleRel = sIsCW ? Math.PI / 2 : -Math.PI / 2;
+    const tNormalAngleRel = tIsCW ? Math.PI / 2 : -Math.PI / 2;
 
-    // A. Rotate Source around its centroid
-    const rotated = rotatePolygon(sourcePoly, sourcePoly.centroid, angleDiff);
+    const sNormalAngle = angleSource + sNormalAngleRel;
+    const tNormalAngle = angleTarget + tNormalAngleRel;
+
+    // 3. Determine Required Rotation
+    // We want transformed Source Normal to be opposite to Target Normal
+    // Target Normal + PI = Source Normal + Rotation
+    // Rotation = Target Normal + PI - Source Normal
+    const rotationNeeded = tNormalAngle + Math.PI - sNormalAngle;
+
+    // Rotate Source around its centroid
+    const rotated = rotatePolygon(sourcePoly, sourcePoly.centroid, rotationNeeded);
     
-    // B. Get rotated source start vertex
+    // Get rotated vertices
     const rV1 = rotated.vertices.find(v => v.id === sV1.id)!;
     const rV2 = rotated.vertices.find(v => v.id === sV2.id)!;
     
-    // C. Calculate Target Anchor Point
-    // We align the line (rV1 -> rV2) onto the line (tV1 -> tV2)
-    // Anchor: We want rV1 (or rV2) to lie on the line.
+    // 4. Calculate Midpoints
+    const rMid = { x: (rV1.x + rV2.x) / 2, y: (rV1.y + rV2.y) / 2 };
+    const tMid = { x: (tV1.x + tV2.x) / 2, y: (tV1.y + tV2.y) / 2 };
+
+    // 5. Calculate Positioning Vectors
+    // We want to position Source at: TargetMid + (OutwardNormal * Gap) + (EdgeDir * Offset)
     
-    // Vector of Target Edge (Unit vector)
+    // Target Outward Normal = Opposite of Inward Normal
+    // Angle = tNormalAngle + PI
+    const tOutAngle = tNormalAngle + Math.PI;
+    const nx = Math.cos(tOutAngle);
+    const ny = Math.sin(tOutAngle);
+
+    // Target Edge Direction Unit Vector
     const tLen = distance(tV1, tV2);
     const ux = (tV2.x - tV1.x) / tLen;
     const uy = (tV2.y - tV1.y) / tLen;
 
-    // D. Calculate Translation to snap Start-to-End (Standard Join)
-    // Usually we snap rV1 to tV2 (Start of source to End of target for continuous flow) 
-    // OR rV1 to tV1 if we want them side-by-side. 
-    // Given the 'offset', let's base it on tV1 as origin.
-    
-    const pxPerMeter = tEdge.length > 0 ? tLen / tEdge.length : PIXELS_PER_METER;
-    const offsetPx = offset * pxPerMeter;
+    // Distances in Pixels
+    const distPx = perpendicularDist * PIXELS_PER_METER;
+    const offsetPx = offset * PIXELS_PER_METER;
 
-    const targetX = tV1.x + ux * offsetPx;
-    const targetY = tV1.y + uy * offsetPx;
+    const targetX = tMid.x + (nx * distPx) + (ux * offsetPx);
+    const targetY = tMid.y + (ny * distPx) + (uy * offsetPx);
 
-    // E. Translate
-    // Note: Due to rotation, rV1 might not be the 'start' visually anymore, but logically it is.
-    // If we want rV2 (end of source edge) to align with tV1 (start of target edge), we'd translate rV2 to target.
-    // Let's assume rV1 aligns with tV1 + offset.
-    
-    const dx = targetX - rV1.x;
-    const dy = targetY - rV1.y;
+    // 6. Translate Source Midpoint to Target Point
+    const dx = targetX - rMid.x;
+    const dy = targetY - rMid.y;
     
     return translatePolygon(rotated, dx, dy);
 };
@@ -289,13 +366,7 @@ export const calculateSASDistance = (lenA: number, lenB: number, angleDeg: numbe
 
 export const calculatePolygonArea = (vertices: Vertex[]): number => {
     if (vertices.length < 3) return 0;
-    let area = 0;
-    for (let i = 0; i < vertices.length; i++) {
-        const j = (i + 1) % vertices.length;
-        area += vertices[i].x * vertices[j].y;
-        area -= vertices[j].x * vertices[i].y;
-    }
-    const areaPx = Math.abs(area) / 2;
+    const areaPx = Math.abs(getPolygonSignedArea(vertices));
     return areaPx / (PIXELS_PER_METER * PIXELS_PER_METER);
 };
 

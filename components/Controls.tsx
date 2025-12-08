@@ -1,8 +1,9 @@
 
-import React, { useState, useRef, useEffect } from 'react';
+
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useSurvey } from '../context/SurveyContext';
 import { generateRegularPolygon, checkConnectionStatus, generateDXF } from '../utils/geometry';
-import { Plus, Ruler, RefreshCw, Trash2, Download, Focus, Minus, Link2, Unlink, AlertTriangle, CheckCircle, X, Layers, Check, Undo2, Redo2, Scaling, ArrowRightLeft, Square, Ban, PenTool, StopCircle, Split, PlusCircle, MoveHorizontal, FileJson, FileType, Upload, FolderOpen, Sun, Moon, HelpCircle, Command, FilePlus, Pencil } from 'lucide-react';
+import { Plus, Ruler, RefreshCw, Trash2, Focus, Minus, Link2, Unlink, AlertTriangle, CheckCircle, X, Layers, Check, Undo2, Redo2, ArrowRightLeft, Square, Ban, PenTool, StopCircle, Split, MoveHorizontal, FileJson, FileType, Upload, FolderOpen, Sun, Moon, HelpCircle, Pencil, ChevronDown, ChevronRight, Lock, Unlock, ArrowRight } from 'lucide-react';
 import { EdgeType, Polygon } from '../types';
 
 export const Controls: React.FC = () => {
@@ -18,6 +19,9 @@ export const Controls: React.FC = () => {
   // Renaming State
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
+  
+  // Collapsed Groups State
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
 
   const addMenuRef = useRef<HTMLDivElement>(null);
   const layerMenuRef = useRef<HTMLDivElement>(null);
@@ -29,6 +33,33 @@ export const Controls: React.FC = () => {
   const selectedEdge = selectedEdges.length === 1 ? selectedEdges[0] : null; 
   
   const selectedVerticesCount = state.selectedVertexIds.length;
+
+  // Grouping Logic for List View
+  const polygonGroups = useMemo(() => {
+      const groups: Record<string, Polygon[]> = {};
+      const ungrouped: Polygon[] = [];
+
+      state.polygons.forEach(p => {
+          if (p.groupId) {
+              if (!groups[p.groupId]) groups[p.groupId] = [];
+              groups[p.groupId].push(p);
+          } else {
+              ungrouped.push(p);
+          }
+      });
+      
+      return { groups, ungrouped };
+  }, [state.polygons]);
+
+  const toggleGroupCollapse = (groupId: string, e: React.MouseEvent) => {
+      e.stopPropagation();
+      setCollapsedGroups(prev => {
+          const next = new Set(prev);
+          if (next.has(groupId)) next.delete(groupId);
+          else next.add(groupId);
+          return next;
+      });
+  };
 
   // Keyboard Shortcuts
   useEffect(() => {
@@ -62,6 +93,7 @@ export const Controls: React.FC = () => {
           }
           if (e.key === 'Escape') {
               if (state.isDrawingMode) dispatch({ type: 'CANCEL_DRAWING', payload: undefined });
+              if (state.isJoinMode) dispatch({ type: 'CANCEL_JOIN_CONFLICT', payload: undefined });
               if (showHelp) setShowHelp(false);
               setShowAddMenu(false);
               setShowLayerMenu(false);
@@ -79,7 +111,7 @@ export const Controls: React.FC = () => {
       };
       window.addEventListener('keydown', handleKeyDown);
       return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedPoly, selectedEdge, state.selectedVertexIds, state.isDrawingMode, showHelp, editingId]);
+  }, [selectedPoly, selectedEdge, state.selectedVertexIds, state.isDrawingMode, state.isJoinMode, showHelp, editingId]);
 
   // Constraint Status calculation
   const constraintStats = React.useMemo(() => {
@@ -322,6 +354,76 @@ export const Controls: React.FC = () => {
       dispatch({ type: 'PAN_ZOOM', payload: { x: newPanX, y: newPanY, zoom: newZoom, rotation: 0 } });
   };
 
+  const renderPolygonListItem = (p: Polygon) => (
+      <div 
+        key={p.id}
+        onClick={() => {
+            dispatch({ type: 'SELECT_POLYGON', payload: { id: p.id, shouldFocus: true } });
+        }}
+        className={`flex items-center justify-between p-2 rounded cursor-pointer ${
+            p.id === state.selectedPolygonId 
+            ? 'bg-brand-100 dark:bg-brand-900/50 border border-brand-500/50' 
+            : 'hover:bg-slate-100 dark:hover:bg-slate-700 border border-transparent'
+        }`}
+      >
+        <div className="flex items-center gap-2 flex-1 min-w-0">
+            {p.id === state.selectedPolygonId && <Check size={14} className="text-brand-600 dark:text-brand-400 shrink-0" />}
+            {p.isLocked ? <Lock size={12} className="text-amber-500/70 shrink-0" /> : <Unlock size={12} className="text-slate-300 shrink-0"/>}
+            
+            {editingId === p.id ? (
+                <input 
+                    autoFocus
+                    type="text"
+                    value={editName}
+                    onChange={(e) => setEditName(e.target.value)}
+                    onBlur={() => {
+                        if (editName.trim()) dispatch({ type: 'RENAME_POLYGON', payload: { polygonId: p.id, name: editName.trim() }});
+                        setEditingId(null);
+                    }}
+                    onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                            if (editName.trim()) dispatch({ type: 'RENAME_POLYGON', payload: { polygonId: p.id, name: editName.trim() }});
+                            setEditingId(null);
+                        }
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                    className="w-full bg-white dark:bg-slate-900 border border-brand-500 rounded px-1 py-0.5 text-xs text-slate-900 dark:text-slate-100"
+                />
+            ) : (
+                <span className={`text-sm font-medium truncate ${p.id === state.selectedPolygonId ? 'text-brand-700 dark:text-brand-200' : ''}`}>
+                    {p.name}
+                </span>
+            )}
+        </div>
+        <div className="flex items-center gap-1">
+            {editingId !== p.id && (
+                <button
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        setEditingId(p.id);
+                        setEditName(p.name);
+                    }}
+                    className="p-1.5 text-slate-400 hover:text-brand-500 rounded hover:bg-slate-200 dark:hover:bg-slate-900/50"
+                    title="Rename"
+                >
+                    <Pencil size={14} />
+                </button>
+            )}
+            <button 
+                type="button"
+                onClick={(e) => {
+                    e.stopPropagation();
+                    dispatch({ type: 'DELETE_POLYGON', payload: p.id });
+                }}
+                className="p-1.5 text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 rounded hover:bg-slate-200 dark:hover:bg-slate-900/50 cursor-pointer"
+                title="Delete"
+            >
+                <Trash2 size={16} />
+            </button>
+        </div>
+      </div>
+  );
+
   const buttonClass = (isActive: boolean = false) => `p-3 rounded-xl flex flex-col items-center gap-1 min-w-[56px] transition-colors ${
       isActive 
       ? 'bg-brand-500 text-white' 
@@ -430,76 +532,35 @@ export const Controls: React.FC = () => {
                                                 </span>
                                             </div>
                                             <div className="h-px bg-slate-200 dark:bg-slate-700 my-1 mx-2"></div>
+                                            
                                             {state.polygons.length === 0 ? (
                                                 <div className="text-slate-500 text-sm px-2 py-2 text-center">No polygons</div>
                                             ) : (
-                                                state.polygons.map(p => (
-                                                    <div 
-                                                        key={p.id}
-                                                        onClick={() => {
-                                                            dispatch({ type: 'SELECT_POLYGON', payload: { id: p.id, shouldFocus: true } });
-                                                        }}
-                                                        className={`flex items-center justify-between p-2 rounded cursor-pointer ${
-                                                            p.id === state.selectedPolygonId 
-                                                            ? 'bg-brand-100 dark:bg-brand-900/50 border border-brand-500/50' 
-                                                            : 'hover:bg-slate-100 dark:hover:bg-slate-700 border border-transparent'
-                                                        }`}
-                                                    >
-                                                        <div className="flex items-center gap-2 flex-1">
-                                                            {p.id === state.selectedPolygonId && <Check size={14} className="text-brand-600 dark:text-brand-400 shrink-0" />}
-                                                            {editingId === p.id ? (
-                                                                <input 
-                                                                    autoFocus
-                                                                    type="text"
-                                                                    value={editName}
-                                                                    onChange={(e) => setEditName(e.target.value)}
-                                                                    onBlur={() => {
-                                                                        if (editName.trim()) dispatch({ type: 'RENAME_POLYGON', payload: { polygonId: p.id, name: editName.trim() }});
-                                                                        setEditingId(null);
-                                                                    }}
-                                                                    onKeyDown={(e) => {
-                                                                        if (e.key === 'Enter') {
-                                                                            if (editName.trim()) dispatch({ type: 'RENAME_POLYGON', payload: { polygonId: p.id, name: editName.trim() }});
-                                                                            setEditingId(null);
-                                                                        }
-                                                                    }}
-                                                                    onClick={(e) => e.stopPropagation()}
-                                                                    className="w-full bg-white dark:bg-slate-900 border border-brand-500 rounded px-1 py-0.5 text-xs text-slate-900 dark:text-slate-100"
-                                                                />
-                                                            ) : (
-                                                                <span className={`text-sm font-medium truncate ${p.id === state.selectedPolygonId ? 'text-brand-700 dark:text-brand-200' : ''}`}>
-                                                                    {p.name}
-                                                                </span>
-                                                            )}
-                                                        </div>
-                                                        <div className="flex items-center gap-1">
-                                                            {editingId !== p.id && (
-                                                                <button
-                                                                    onClick={(e) => {
-                                                                        e.stopPropagation();
-                                                                        setEditingId(p.id);
-                                                                        setEditName(p.name);
-                                                                    }}
-                                                                    className="p-1.5 text-slate-400 hover:text-brand-500 rounded hover:bg-slate-200 dark:hover:bg-slate-900/50"
-                                                                    title="Rename"
-                                                                >
-                                                                    <Pencil size={14} />
-                                                                </button>
-                                                            )}
-                                                            <button 
-                                                                type="button"
-                                                                onClick={(e) => {
-                                                                    e.stopPropagation();
-                                                                    dispatch({ type: 'DELETE_POLYGON', payload: p.id });
-                                                                }}
-                                                                className="p-1.5 text-slate-500 hover:text-red-500 rounded hover:bg-slate-200 dark:hover:bg-slate-900/50 cursor-pointer"
-                                                                title="Delete"
+                                                <>
+                                                    {/* RENDER GROUPS */}
+                                                    {Object.entries(polygonGroups.groups).map(([groupId, groupPolygons]) => {
+                                                        const polygons = groupPolygons as Polygon[];
+                                                        return (
+                                                        <div key={groupId} className="rounded border border-slate-100 dark:border-slate-700/50 overflow-hidden mb-1">
+                                                            <div 
+                                                                onClick={(e) => toggleGroupCollapse(groupId, e)}
+                                                                className="flex items-center gap-2 p-1.5 bg-slate-50 dark:bg-slate-700/50 cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-700"
                                                             >
-                                                                <Trash2 size={16} />
-                                                            </button>
+                                                                {collapsedGroups.has(groupId) ? <ChevronRight size={14}/> : <ChevronDown size={14}/>}
+                                                                <span className="text-xs font-bold text-slate-500 uppercase">Group</span>
+                                                                <span className="text-[10px] bg-slate-200 dark:bg-slate-600 px-1 rounded-full">{polygons.length}</span>
+                                                            </div>
+                                                            {!collapsedGroups.has(groupId) && (
+                                                                <div className="pl-2 pr-1 pb-1 pt-1 bg-white dark:bg-slate-800 space-y-1">
+                                                                    {polygons.map(p => renderPolygonListItem(p))}
+                                                                </div>
+                                                            )}
                                                         </div>
-                                                    </div>
-                                                ))
+                                                    )})}
+                                                    
+                                                    {/* RENDER UNGROUPED */}
+                                                    {polygonGroups.ungrouped.map(p => renderPolygonListItem(p))}
+                                                </>
                                             )}
                                         </div>
                                     </div>
@@ -521,7 +582,7 @@ export const Controls: React.FC = () => {
                                 {showExportMenu && (
                                      <div ref={exportMenuRef} className="fixed left-4 right-4 top-20 sm:absolute sm:top-full sm:left-0 sm:right-auto sm:w-48 mt-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-lg p-2 shadow-xl z-50 animate-in fade-in zoom-in-95 duration-200 origin-top-left text-slate-800 dark:text-slate-200">
                                          <button onClick={() => { dispatch({ type: 'RESET_CANVAS', payload: undefined }); setShowExportMenu(false); }} className="w-full flex items-center gap-2 p-2 rounded hover:bg-slate-100 dark:hover:bg-slate-700 text-sm text-red-600 dark:text-red-400">
-                                             <FilePlus size={16}/> New / Reset
+                                             <FileJson size={16}/> New / Reset
                                          </button>
                                          <div className="h-px bg-slate-200 dark:bg-slate-700 my-1"></div>
                                          <label className="w-full flex items-center gap-2 p-2 rounded hover:bg-slate-100 dark:hover:bg-slate-700 text-sm cursor-pointer">
@@ -649,6 +710,44 @@ export const Controls: React.FC = () => {
             )}
         </div>
 
+        {/* JOIN CONFLICT MODAL */}
+        {state.joinConflict && (
+            <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 pointer-events-auto">
+                <div className="absolute inset-0 bg-slate-900/50 backdrop-blur-sm" onClick={() => dispatch({ type: 'CANCEL_JOIN_CONFLICT', payload: undefined })}></div>
+                <div className="relative bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-sm w-full p-6 border border-slate-200 dark:border-slate-700">
+                    <h3 className="text-lg font-bold text-slate-800 dark:text-white mb-2 flex items-center gap-2">
+                        <AlertTriangle className="text-amber-500" size={24}/>
+                        Thickness Conflict
+                    </h3>
+                    <p className="text-sm text-slate-600 dark:text-slate-300 mb-6">
+                        The joined edges have different thicknesses. Please select which thickness to apply to both edges.
+                    </p>
+                    <div className="grid grid-cols-2 gap-3 mb-4">
+                        <button 
+                            onClick={() => dispatch({ type: 'RESOLVE_JOIN_CONFLICT', payload: state.joinConflict!.sourceThickness })}
+                            className="flex flex-col items-center justify-center p-4 rounded-xl border-2 border-slate-200 dark:border-slate-600 hover:border-brand-500 dark:hover:border-brand-500 bg-slate-50 dark:bg-slate-700/50 hover:bg-brand-50 dark:hover:bg-brand-900/20 transition-all group"
+                        >
+                            <span className="text-xs uppercase font-bold text-slate-500 group-hover:text-brand-500">Source</span>
+                            <span className="text-2xl font-bold text-slate-800 dark:text-white mt-1">{state.joinConflict!.sourceThickness} <span className="text-xs font-normal">cm</span></span>
+                        </button>
+                        <button 
+                            onClick={() => dispatch({ type: 'RESOLVE_JOIN_CONFLICT', payload: state.joinConflict!.targetThickness })}
+                            className="flex flex-col items-center justify-center p-4 rounded-xl border-2 border-slate-200 dark:border-slate-600 hover:border-brand-500 dark:hover:border-brand-500 bg-slate-50 dark:bg-slate-700/50 hover:bg-brand-50 dark:hover:bg-brand-900/20 transition-all group"
+                        >
+                            <span className="text-xs uppercase font-bold text-slate-500 group-hover:text-brand-500">Target</span>
+                            <span className="text-2xl font-bold text-slate-800 dark:text-white mt-1">{state.joinConflict!.targetThickness} <span className="text-xs font-normal">cm</span></span>
+                        </button>
+                    </div>
+                    <button 
+                        onClick={() => dispatch({ type: 'CANCEL_JOIN_CONFLICT', payload: undefined })}
+                        className="w-full py-2 text-sm font-bold text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
+                    >
+                        Cancel Join
+                    </button>
+                </div>
+            </div>
+        )}
+
         {/* Flying Edge Editor */}
         {!state.isJoinMode && !state.isDrawingMode && selectedEdge && edgeEditorPos && (
              <div 
@@ -665,11 +764,12 @@ export const Controls: React.FC = () => {
                                     <Split size={14} />
                                 </button>
                             )}
-                            {selectedEdge.type === EdgeType.PERIMETER && !selectedEdge.linkedEdgeId && state.polygons.length > 1 && (
+                            {/* JOIN BUTTON: ONLY VISIBLE IF NOT LINKED AND POLYGON IS LOCKED */}
+                            {selectedEdge.type === EdgeType.PERIMETER && !selectedEdge.linkedEdgeId && state.polygons.length > 1 && selectedPoly?.isLocked && (
                                 <button 
-                                    onClick={() => dispatch({ type: 'SHOW_MESSAGE', payload: { type: 'success', text: 'Future Implementation' } })} 
+                                    onClick={() => dispatch({ type: 'START_JOIN_MODE', payload: selectedEdge.id })} 
                                     className="text-yellow-600 dark:text-yellow-400 hover:bg-yellow-50 dark:hover:bg-yellow-900/30 p-1.5 rounded" 
-                                    title="Join (Future)"
+                                    title="Join / Snap"
                                 >
                                     <ArrowRightLeft size={14} />
                                 </button>
@@ -710,7 +810,7 @@ export const Controls: React.FC = () => {
                                 {selectedEdge.linkedEdgeId && (
                                     <div className="bg-slate-100 dark:bg-slate-700/50 p-2 rounded-lg">
                                         <div className="flex justify-between text-[10px] text-brand-600 dark:text-brand-300 uppercase font-bold mb-1">
-                                            <span className="flex items-center gap-1"><MoveHorizontal size={10} /> Offset</span>
+                                            <span className="flex items-center gap-1"><MoveHorizontal size={10} /> Offset (Slide)</span>
                                             <span>{(selectedEdge.alignmentOffset || 0).toFixed(2)} m</span>
                                         </div>
                                         <input 
@@ -829,8 +929,8 @@ export const Controls: React.FC = () => {
                                 <li><strong>Add Shapes:</strong> Use the "Add" menu to create regular polygons or sketch freely.</li>
                                 <li><strong>Edit Measures:</strong> Tap any edge to input real-world measurements freely.</li>
                                 <li><strong>Triangulate:</strong> Add diagonal connections between vertices to rigidify the shape.</li>
-                                <li><strong>Solve:</strong> Press "Solve" to reconstruct the geometry based on your measurements.</li>
-                                <li><strong>Join:</strong> Snap and align a polygon to another (Polygons remain independent).</li>
+                                <li><strong>Solve:</strong> Press "Solve" to reconstruct the geometry. Only resolved/locked shapes can be joined.</li>
+                                <li><strong>Join:</strong> Select an edge on a LOCKED shape to snap to another LOCKED shape. They become a rigid group. Only one join allowed between two shapes.</li>
                             </ul>
                         </section>
                     </div>
@@ -848,9 +948,9 @@ export const Controls: React.FC = () => {
         {/* BOTTOM SECTION */}
         <div className="pointer-events-auto w-full p-4 flex flex-col justify-end space-y-3 sm:max-w-md sm:ml-auto sm:mr-4">
             
-            {state.isJoinMode && (
+            {state.isJoinMode && !state.joinConflict && (
                 <div className="bg-yellow-100 dark:bg-yellow-900/80 backdrop-blur border border-yellow-300 dark:border-yellow-600/50 p-4 rounded-xl text-center shadow-2xl animate-in slide-in-from-bottom-5">
-                    <p className="text-yellow-800 dark:text-yellow-100 font-bold mb-2">Select an edge on another polygon to join.</p>
+                    <p className="text-yellow-800 dark:text-yellow-100 font-bold mb-2">Select an edge on another solved polygon.</p>
                     <button onClick={() => dispatch({ type: 'SELECT_POLYGON', payload: selectedPoly?.id || null })} className="bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-900 dark:text-white px-6 py-2 rounded-lg font-bold border border-slate-200 dark:border-slate-600">CANCEL</button>
                 </div>
             )}

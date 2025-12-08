@@ -24,7 +24,7 @@ export interface Edge {
   endVertexId: string;
   length: number; // The real-world measured length (meters)
   type: EdgeType;
-  thickness?: number; // Visual thickness to simulate walls (in world units)
+  thickness?: number; // Visual thickness to simulate walls (in world units, cm usually stored as number)
   linkedEdgeId?: string; // ID of an edge in another polygon this is joined to
   alignmentOffset?: number; // Distance (m) from target start vertex along the shared line
 }
@@ -38,6 +38,8 @@ export interface Polygon {
   isClosed: boolean;
   metricError?: string;
   area?: number;
+  isLocked?: boolean; // If true, vertices cannot be moved individually. Required for Join.
+  groupId?: string; // If set, moves as a rigid body with others in the same group.
 }
 
 // Data required to restore a previous state
@@ -65,6 +67,16 @@ export interface AppState {
   // Interaction Modes
   isJoinMode: boolean; 
   joinSourceEdgeId: string | null; 
+  
+  // Join Conflict State (Thickness Mismatch)
+  joinConflict: {
+      sourcePolyId: string;
+      targetPolyId: string;
+      sourceEdgeId: string;
+      targetEdgeId: string;
+      sourceThickness: number;
+      targetThickness: number;
+  } | null;
 
   // Drawing Mode
   isDrawingMode: boolean;
@@ -106,6 +118,8 @@ export type Action =
   | { type: 'CAPTURE_SNAPSHOT'; payload: void }
   | { type: 'START_JOIN_MODE'; payload: string } 
   | { type: 'COMPLETE_JOIN'; payload: string }
+  | { type: 'RESOLVE_JOIN_CONFLICT'; payload: number } // Payload is chosen thickness
+  | { type: 'CANCEL_JOIN_CONFLICT'; payload: void }
   | { type: 'START_DRAWING'; payload: void }
   | { type: 'ADD_DRAWING_POINT'; payload: Point }
   | { type: 'UNDO_DRAWING_POINT'; payload: void }

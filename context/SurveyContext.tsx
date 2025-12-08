@@ -1,7 +1,8 @@
 
+
 import React, { createContext, useContext, useReducer, ReactNode } from 'react';
 import { AppState, Action, Polygon, EdgeType, Edge, HistoryEntry, Vertex } from '../types';
-import { solveGeometry, distance, checkConnectionStatus, alignPolygonToEdge, calculateCentroid, midPoint, calculatePolygonArea, rotatePolygon, PIXELS_PER_METER, getConnectedPolygonGroup, rotatePoint, translatePolygon } from '../utils/geometry';
+import { solveGeometry, distance, checkConnectionStatus, alignPolygonToEdge, calculateCentroid, midPoint, calculatePolygonArea, rotatePolygon, PIXELS_PER_METER, rotatePoint, translatePolygon, recalculateGroups, getConnectedPolygonGroup } from '../utils/geometry';
 
 const initialState: AppState = {
   theme: 'light',
@@ -18,6 +19,7 @@ const initialState: AppState = {
   isFocused: false,
   isJoinMode: false,
   joinSourceEdgeId: null,
+  joinConflict: null,
   isDrawingMode: false,
   drawingPoints: [],
   past: [],
@@ -40,6 +42,101 @@ const withHistory = (state: AppState): AppState => {
     return { ...state, past: newPast, future: [] };
 };
 
+// --- CORE JOIN LOGIC ---
+const executeJoin = (state: AppState, sourceEdgeId: string, targetEdgeId: string, thickness: number): AppState => {
+    const sourcePoly = state.polygons.find(p => p.edges.some(e => e.id === sourceEdgeId));
+    const targetPoly = state.polygons.find(p => p.edges.some(e => e.id === targetEdgeId));
+
+    if (!sourcePoly || !targetPoly) return state;
+
+    // Update thicknesses locally for the operation
+    const updatedSourceEdges = sourcePoly.edges.map(e => e.id === sourceEdgeId ? { ...e, thickness: thickness } : e);
+    const updatedTargetEdges = targetPoly.edges.map(e => e.id === targetEdgeId ? { ...e, thickness: thickness } : e);
+    
+    // --- ALIGNMENT LOGIC (CENTER + THICKNESS GAP) ---
+    // 1. Initial Offset: 0 means align Center-to-Center.
+    const offset = 0;
+    
+    // 2. Thickness Spacing
+    // gapMeters is derived from the chosen thickness (cm -> m)
+    const gapMeters = thickness / 100;
+
+    // Align
+    const tempSource = { ...sourcePoly, edges: updatedSourceEdges };
+    const tempTarget = { ...targetPoly, edges: updatedTargetEdges };
+    
+    const alignedSourcePoly = alignPolygonToEdge(tempSource, sourceEdgeId, tempTarget, targetEdgeId, offset, gapMeters);
+
+    // Calculate Delta to apply to peers
+    const dx = alignedSourcePoly.vertices[0].x - tempSource.vertices[0].x;
+    const dy = alignedSourcePoly.vertices[0].y - tempSource.vertices[0].y;
+
+    // --- GROUP ID LOGIC ---
+    let finalGroupId: string;
+    if (sourcePoly.groupId && targetPoly.groupId) {
+            // Merge groups: Pick one (source's)
+            finalGroupId = sourcePoly.groupId;
+    } else if (sourcePoly.groupId) {
+            finalGroupId = sourcePoly.groupId;
+    } else if (targetPoly.groupId) {
+            finalGroupId = targetPoly.groupId;
+    } else {
+            // Create new group
+            finalGroupId = `group-${Date.now()}`;
+    }
+    
+    // Finalize Polygons
+    const finalSourcePoly = {
+        ...alignedSourcePoly,
+        groupId: finalGroupId,
+        edges: alignedSourcePoly.edges.map(e => e.id === sourceEdgeId ? { 
+            ...e, 
+            linkedEdgeId: targetEdgeId,
+            alignmentOffset: offset 
+        } : e)
+    };
+
+    const finalTargetPoly = {
+        ...tempTarget,
+        groupId: finalGroupId,
+        edges: tempTarget.edges.map(e => e.id === targetEdgeId ? { 
+            ...e, 
+            linkedEdgeId: sourceEdgeId 
+        } : e)
+    };
+
+    const oldSourceGroupId = sourcePoly.groupId;
+    const oldTargetGroupId = targetPoly.groupId;
+
+    const newPolygons = state.polygons.map(p => {
+        if (p.id === finalSourcePoly.id) return finalSourcePoly;
+        if (p.id === finalTargetPoly.id) return finalTargetPoly;
+        
+        // Propagate move to existing peers of source
+        if (oldSourceGroupId && p.groupId === oldSourceGroupId) {
+             const moved = translatePolygon(p, dx, dy);
+             return { ...moved, groupId: finalGroupId };
+        }
+
+        // Merge target peers into new group
+        if (oldTargetGroupId && p.groupId === oldTargetGroupId) {
+            return { ...p, groupId: finalGroupId };
+        }
+        return p;
+    });
+
+    return {
+        ...withHistory(state),
+        polygons: newPolygons,
+        isJoinMode: false,
+        joinSourceEdgeId: null,
+        joinConflict: null,
+        solverMsg: { type: 'success', text: 'Polygons joined and grouped.' },
+        selectedPolygonId: finalSourcePoly.id,
+        selectedEdgeIds: [sourceEdgeId]
+    };
+};
+
 const surveyReducer = (state: AppState, action: Action): AppState => {
   switch (action.type) {
     case 'TOGGLE_THEME':
@@ -60,7 +157,8 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
             solverMsg: null,
             openVertexMenuId: null,
             isDrawingMode: false, // Cancel drawing on Undo global
-            drawingPoints: []
+            drawingPoints: [],
+            joinConflict: null
         };
     }
 
@@ -112,6 +210,7 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
             drawingPoints: [],
             isJoinMode: false,
             joinSourceEdgeId: null,
+            joinConflict: null,
             isFocused: false
         };
     }
@@ -191,7 +290,8 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
             vertices: newVertices,
             edges: newEdges,
             centroid: calculateCentroid(newVertices),
-            isClosed: true
+            isClosed: true,
+            isLocked: false // Initially unlocked
         };
 
         return {
@@ -200,7 +300,7 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
             isDrawingMode: false,
             drawingPoints: [],
             selectedPolygonId: newPoly.id,
-            solverMsg: { type: 'success', text: 'Polygon created! Add diagonals to make it rigid.' }
+            solverMsg: { type: 'success', text: 'Polygon created! Measurements can be edited.' }
         };
     }
 
@@ -297,6 +397,10 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
         const poly = state.polygons.find(p => p.edges.some(e => e.id === edgeId));
         if (!poly) return state;
 
+        if (poly.isLocked) {
+             return { ...state, solverMsg: { type: 'error', text: 'Cannot split edge on a locked polygon. Modify a length to unlock.' } };
+        }
+
         const edge = poly.edges.find(e => e.id === edgeId);
         if (!edge || edge.type !== EdgeType.PERIMETER) {
             return { ...state, solverMsg: { type: 'error', text: 'Can only split perimeter edges.' } };
@@ -351,7 +455,8 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
         const updatedPoly = {
             ...poly,
             vertices: newVertices,
-            edges: newEdges
+            edges: newEdges,
+            isLocked: false // Modifying geometry unlocks it
         };
 
         const newPolygons = state.polygons.map(p => p.id === poly.id ? updatedPoly : p);
@@ -402,6 +507,10 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
         const poly = state.polygons.find(p => p.vertices.some(v => v.id === vertexId));
         if (!poly) return state;
 
+        if (poly.isLocked) {
+             return { ...state, solverMsg: { type: 'error', text: 'Cannot delete vertex on a locked polygon.' } };
+        }
+
         // Minimum constraint: Triangle
         if (poly.vertices.length <= 3) {
             return {
@@ -442,7 +551,8 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
             ...poly,
             vertices: newVertices,
             edges: newEdges,
-            centroid: calculateCentroid(newVertices)
+            centroid: calculateCentroid(newVertices),
+            isLocked: false // Structure change
         };
 
         const newPolygons = state.polygons.map(p => p.id === poly.id ? updatedPoly : p);
@@ -478,7 +588,7 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
              });
         }
 
-        const updatedPoly = { ...poly, vertices: newVertices, edges: newEdges };
+        const updatedPoly = { ...poly, vertices: newVertices, edges: newEdges, isLocked: false };
         const newPolygons = state.polygons.map(p => p.id === poly.id ? updatedPoly : p);
 
         return {
@@ -490,11 +600,19 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
     }
 
     case 'START_JOIN_MODE': {
+        const sourceEdgeId = action.payload;
+        const sourcePoly = state.polygons.find(p => p.edges.some(e => e.id === sourceEdgeId));
+        
+        if (!sourcePoly) return state;
+        if (!sourcePoly.isLocked) {
+             return { ...state, solverMsg: { type: 'error', text: 'Polygon must be solved (locked) before joining.' } };
+        }
+
         return {
             ...state,
             isJoinMode: true,
-            joinSourceEdgeId: action.payload,
-            solverMsg: { type: 'success', text: 'Select an edge on another polygon to snap to.' },
+            joinSourceEdgeId: sourceEdgeId,
+            solverMsg: { type: 'success', text: 'Select an edge on another solved polygon to snap to.' },
             openVertexMenuId: null
         };
     }
@@ -518,44 +636,73 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
             };
         }
 
-        // Default to 0 offset on initial join (Center Aligned)
-        const offset = 0;
-        const alignedSourcePoly = alignPolygonToEdge(sourcePoly, sourceEdgeId, targetPoly, targetEdgeId, offset);
-        
-        // Link logic: both edges know about each other
-        const updatedSourcePoly = {
-            ...alignedSourcePoly,
-            edges: alignedSourcePoly.edges.map(e => e.id === sourceEdgeId ? { 
-                ...e, 
-                linkedEdgeId: targetEdgeId,
-                alignmentOffset: offset // Init offset
-            } : e)
-        };
+        if (!targetPoly.isLocked) {
+             return { 
+                ...state, 
+                solverMsg: { type: 'error', text: 'Target polygon is not solved (locked). Solve it first.' }
+            };
+        }
 
-        const updatedTargetPoly = {
-            ...targetPoly,
-            edges: targetPoly.edges.map(e => e.id === targetEdgeId ? { 
-                ...e, 
-                linkedEdgeId: sourceEdgeId 
-            } : e)
-        };
-
-        const newPolygons = state.polygons.map(p => {
-            if (p.id === updatedSourcePoly.id) return updatedSourcePoly;
-            if (p.id === updatedTargetPoly.id) return updatedTargetPoly;
-            return p;
+        // --- SINGLE JOIN CONSTRAINT ---
+        // Check if ANY edge in sourcePoly is already linked to targetPoly
+        const alreadyLinked = sourcePoly.edges.some(e => {
+            if (!e.linkedEdgeId) return false;
+            // Find which poly has this linked edge
+            const linkedPoly = state.polygons.find(p => p.edges.some(le => le.id === e.linkedEdgeId));
+            return linkedPoly?.id === targetPoly.id;
         });
 
-        return {
-            ...withHistory(state),
-            polygons: newPolygons,
-            isJoinMode: false,
-            joinSourceEdgeId: null,
-            solverMsg: { type: 'success', text: 'Polygons joined. Edges aligned.' },
-            selectedPolygonId: updatedSourcePoly.id,
-            selectedEdgeIds: [sourceEdgeId]
-        };
+        if (alreadyLinked) {
+            return {
+                ...state,
+                isJoinMode: false,
+                joinSourceEdgeId: null,
+                solverMsg: { type: 'error', text: 'Polygons are already joined by another edge. Only one join allowed.' }
+            };
+        }
+
+        const sEdge = sourcePoly.edges.find(e => e.id === sourceEdgeId)!;
+        const tEdge = targetPoly.edges.find(e => e.id === targetEdgeId)!;
+
+        // --- THICKNESS CONFLICT CHECK ---
+        const sThick = sEdge.thickness || 10;
+        const tThick = tEdge.thickness || 10;
+
+        if (sThick !== tThick) {
+            return {
+                ...state,
+                joinConflict: {
+                    sourcePolyId: sourcePoly.id,
+                    targetPolyId: targetPoly.id,
+                    sourceEdgeId,
+                    targetEdgeId,
+                    sourceThickness: sThick,
+                    targetThickness: tThick
+                }
+                // Do NOT clear isJoinMode yet, wait for resolution
+            };
+        }
+
+        // If thicknesses match, proceed directly using helper
+        return executeJoin(state, sourceEdgeId, targetEdgeId, sThick);
     }
+
+    case 'RESOLVE_JOIN_CONFLICT': {
+        const thickness = action.payload;
+        const conflict = state.joinConflict;
+
+        if (!conflict) return state;
+
+        return executeJoin(state, conflict.sourceEdgeId, conflict.targetEdgeId, thickness);
+    }
+
+    case 'CANCEL_JOIN_CONFLICT':
+        return {
+            ...state,
+            joinConflict: null,
+            isJoinMode: false,
+            joinSourceEdgeId: null
+        };
     
     case 'UNLINK_EDGE': {
         const edgeId = action.payload;
@@ -567,7 +714,8 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
 
         const targetPolyId = state.polygons.find(p => p.edges.some(e => e.id === edge.linkedEdgeId))?.id;
 
-        const newPolygons = state.polygons.map(p => {
+        // 1. Remove Links
+        let newPolygons = state.polygons.map(p => {
             if (p.id === poly.id) {
                 return {
                     ...p,
@@ -583,10 +731,16 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
             return p;
         });
 
+        // 2. Recalculate Groups
+        // If the group was broken, some polygons might need new Group IDs
+        if (poly.groupId) {
+            newPolygons = recalculateGroups(newPolygons);
+        }
+
         return {
             ...withHistory(state),
             polygons: newPolygons,
-            solverMsg: { type: 'success', text: 'Edges unlinked.' }
+            solverMsg: { type: 'success', text: 'Edges unlinked. Groups updated.' }
         };
     }
 
@@ -601,16 +755,32 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
         const targetPoly = state.polygons.find(p => p.edges.some(e => e.id === sourceEdge.linkedEdgeId));
         if (!targetPoly) return state;
 
-        // Perform Alignment with new Offset
-        const alignedPoly = alignPolygonToEdge(sourcePoly, edgeId, targetPoly, sourceEdge.linkedEdgeId, offset);
-        
-        // Update the polygon's position AND the edge's offset property
-        const updatedSourcePoly = {
-            ...alignedPoly,
-            edges: alignedPoly.edges.map(e => e.id === edgeId ? { ...e, alignmentOffset: offset } : e)
-        };
+        // Keep thickness gap during update
+        const gapMeters = (sourceEdge.thickness || 10) / 100; 
 
-        const newPolygons = state.polygons.map(p => p.id === sourcePoly.id ? updatedSourcePoly : p);
+        // Align sourcePoly to get new position relative to target
+        const alignedPoly = alignPolygonToEdge(sourcePoly, edgeId, targetPoly, sourceEdge.linkedEdgeId, offset, gapMeters);
+        
+        const dx = alignedPoly.vertices[0].x - sourcePoly.vertices[0].x;
+        const dy = alignedPoly.vertices[0].y - sourcePoly.vertices[0].y;
+
+        // Propagate to subgroup: All connected to sourcePoly, excluding targetPoly (and its side of the link)
+        const subgroupIds = getConnectedPolygonGroup(sourcePoly.id, state.polygons, targetPoly.id);
+
+        const newPolygons = state.polygons.map(p => {
+            // Main moved poly
+            if (p.id === sourcePoly.id) {
+                return {
+                    ...alignedPoly,
+                    edges: alignedPoly.edges.map(e => e.id === edgeId ? { ...e, alignmentOffset: offset } : e)
+                };
+            }
+            // Subgroup peers
+            if (subgroupIds.has(p.id)) {
+                return translatePolygon(p, dx, dy);
+            }
+            return p;
+        });
 
         return {
             ...withHistory(state),
@@ -624,6 +794,10 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
         const polyIndex = state.polygons.findIndex(p => p.id === state.selectedPolygonId);
         if (polyIndex === -1) return state;
         const poly = state.polygons[polyIndex];
+        
+        if (poly.isLocked) {
+             return { ...state, solverMsg: { type: 'error', text: 'Cannot add diagonal to locked polygon. Edit a length to unlock.' } };
+        }
 
         const v1 = poly.vertices.find(v => v.id === state.selectedVertexIds[0]);
         const v2 = poly.vertices.find(v => v.id === state.selectedVertexIds[1]);
@@ -664,6 +838,10 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
         const edgeId = action.payload; 
         const poly = state.polygons.find(p => p.edges.some(e => e.id === edgeId));
         if (!poly) return state;
+        
+        if (poly.isLocked) {
+             return { ...state, solverMsg: { type: 'error', text: 'Cannot delete edge of locked polygon.' } };
+        }
 
         const edgeToDelete = poly.edges.find(e => e.id === edgeId);
         if (!edgeToDelete || edgeToDelete.type === EdgeType.PERIMETER) {
@@ -690,22 +868,16 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
         const poly = state.polygons.find(p => p.edges.some(e => e.id === edgeId));
         if (!poly) return state;
 
-        const edge = poly.edges.find(e => e.id === edgeId);
-        if (!edge) return state;
-
         let newPolygons = [...state.polygons];
 
         newPolygons = newPolygons.map(p => {
             if (p.id !== poly.id) return p;
             return {
                 ...p,
+                isLocked: false, // Modification unlocks the polygon
                 edges: p.edges.map(e => e.id === edgeId ? { ...e, length } : e)
             };
         });
-
-        // If edge is linked, update connected edge length too? 
-        // User asked for "same spacing and same thickness", but length can be different.
-        // We do NOT auto-update length of linked edge, as specified "Lengths can be different".
 
         return { ...withHistory(state), polygons: newPolygons, solverMsg: null };
     }
@@ -715,12 +887,58 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
         const poly = state.polygons.find(p => p.edges.some(e => e.id === edgeId));
         if (!poly) return state;
 
+        const edge = poly.edges.find(e => e.id === edgeId)!;
+
+        // 1. Basic Update (if not linked)
+        if (!edge.linkedEdgeId) {
+             const newPolygons = state.polygons.map(p => {
+                if (p.id !== poly.id) return p;
+                return {
+                    ...p,
+                    edges: p.edges.map(e => e.id === edgeId ? { ...e, thickness } : e)
+                };
+            });
+            return { ...withHistory(state), polygons: newPolygons };
+        }
+
+        // 2. Linked Update
+        const targetPoly = state.polygons.find(p => p.edges.some(e => e.id === edge.linkedEdgeId));
+        if (!targetPoly) return state;
+
+        // Calculate Alignment / Move Delta based on new thickness
+        const gapMeters = thickness / 100;
+        const currentOffset = edge.alignmentOffset || 0;
+        
+        // Calculate new position for Source Poly
+        const alignedPoly = alignPolygonToEdge(poly, edgeId, targetPoly, edge.linkedEdgeId, currentOffset, gapMeters);
+        
+        const dx = alignedPoly.vertices[0].x - poly.vertices[0].x;
+        const dy = alignedPoly.vertices[0].y - poly.vertices[0].y;
+
+        // Find subgroup to move: All connected to poly, EXCLUDING targetPoly branch
+        const subgroupIds = getConnectedPolygonGroup(poly.id, state.polygons, targetPoly.id);
+
         const newPolygons = state.polygons.map(p => {
-            if (p.id !== poly.id) return p;
-            return {
-                ...p,
-                edges: p.edges.map(e => e.id === edgeId ? { ...e, thickness } : e)
-            };
+            // Update thickness for Source Poly & Move
+            if (p.id === poly.id) {
+                const moved = translatePolygon(p, dx, dy);
+                return {
+                    ...moved,
+                    edges: moved.edges.map(e => e.id === edgeId ? { ...e, thickness } : e)
+                };
+            }
+            // Update thickness for Target Poly (No move)
+            if (p.id === targetPoly.id) {
+                return {
+                    ...p,
+                    edges: p.edges.map(e => e.id === edge.linkedEdgeId ? { ...e, thickness } : e)
+                };
+            }
+            // Move Subgroup Peers
+            if (subgroupIds.has(p.id)) {
+                 return translatePolygon(p, dx, dy);
+            }
+            return p;
         });
         
         return { ...withHistory(state), polygons: newPolygons };
@@ -733,14 +951,11 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
 
         const poly = state.polygons[targetPolyIndex];
 
-        // Strict Check: If vertex belongs to a linked edge, prevent manual movement to preserve alignment
-        const isLinked = poly.edges.some(e => 
-            (e.startVertexId === vertexId || e.endVertexId === vertexId) && 
-            !!e.linkedEdgeId
-        );
-
-        // REMOVED STRICT CHECK TO ALLOW FREE MOVEMENT AS REQUESTED
-        // if (isLinked) { ... }
+        // PREVENT MOVEMENT IF LOCKED
+        if (poly.isLocked) {
+            // We can return state without change, or set a message (throttled)
+            return state; 
+        }
 
         const newVertices = poly.vertices.map(v => v.id === vertexId ? { ...v, x, y } : v);
         
@@ -760,13 +975,14 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
     case 'MOVE_POLYGON': {
         const { polygonId, dx, dy } = action.payload;
         
-        // 1. Find the connected Group
-        // REMOVED GROUP TRAVERSAL - Independent Movement
-        // const group = getConnectedPolygonGroup(polygonId, state.polygons);
+        const mainPoly = state.polygons.find(p => p.id === polygonId);
+        if (!mainPoly) return state;
+
+        // Group Logic: If polygon has a groupId, move all polygons in that group
+        const movingGroup = mainPoly.groupId;
         
-        // 2. Move ONLY selected polygon
         const newPolygons = state.polygons.map(p => {
-            if (p.id === polygonId) {
+            if (p.id === polygonId || (movingGroup && p.groupId === movingGroup)) {
                 return translatePolygon(p, dx, dy);
             }
             return p;
@@ -785,12 +1001,17 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
         const mainPoly = state.polygons.find(p => p.id === polygonId);
         if (!mainPoly) return state;
 
-        // REMOVED GROUP TRAVERSAL - Independent Rotation
-
-        // Rotate Main Polygon around its OWN centroid
+        // Rotate Main Polygon around its OWN centroid (User is grabbing handle of mainPoly)
         const center = mainPoly.centroid;
+        const movingGroup = mainPoly.groupId;
+
         const newPolygons = state.polygons.map(p => {
+            // Rotate the handled polygon
             if (p.id === polygonId) {
+                return rotatePolygon(p, center, rotationDelta);
+            }
+            // Rotate group peers around the SAME center (pivot)
+            if (movingGroup && p.groupId === movingGroup) {
                 return rotatePolygon(p, center, rotationDelta);
             }
             return p;
@@ -827,6 +1048,9 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
             // Update area if solved
             if (!error) {
                 solvedPoly.area = calculatePolygonArea(solvedPoly.vertices);
+                solvedPoly.isLocked = true; // LOCK ON SUCCESS
+            } else {
+                solvedPoly.isLocked = false;
             }
 
             if (error) {
@@ -847,6 +1071,7 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
                 } else {
                      msg = { type: 'error', text: `Unstable Geometry: Connectivity issue. Ensure the shape is rigid.` } as const;
                 }
+                solvedPoly.isLocked = false;
             } else {
                  if (totalConstraints > needed) {
                      msg = { type: 'success', text: approx ? 'Geometry reconstructed! (Over-determined, Approx. applied)' : 'Geometry reconstructed! (Over-determined)' } as const;
@@ -874,9 +1099,17 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
 
     case 'DELETE_POLYGON': {
         const isSelected = state.selectedPolygonId === action.payload;
+        // If deleting a polygon, update groups of others if needed (if it was a bridge)
+        const polyToDelete = state.polygons.find(p => p.id === action.payload);
+        let updatedPolygons = state.polygons.filter(p => p.id !== action.payload);
+        
+        if (polyToDelete?.groupId) {
+             updatedPolygons = recalculateGroups(updatedPolygons);
+        }
+
         return {
             ...withHistory(state),
-            polygons: state.polygons.filter(p => p.id !== action.payload),
+            polygons: updatedPolygons,
             selectedPolygonId: isSelected ? null : state.selectedPolygonId, 
             selectedEdgeIds: isSelected ? [] : state.selectedEdgeIds,
             solverMsg: null

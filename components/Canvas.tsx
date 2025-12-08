@@ -1,4 +1,5 @@
 
+
 import React, { useRef, useState, useMemo } from 'react';
 import { useSurvey } from '../context/SurveyContext';
 import { EdgeType } from '../types';
@@ -50,7 +51,12 @@ export const Canvas: React.FC = () => {
       if (state.isJoinMode) return state.polygons;
 
       if (state.selectedPolygonId && state.isFocused) {
-          return state.polygons.filter(p => p.id === state.selectedPolygonId || p.edges.some(e => e.linkedEdgeId));
+          // If focused, show the selected polygon AND its group members
+          const selected = state.polygons.find(p => p.id === state.selectedPolygonId);
+          if (selected?.groupId) {
+              return state.polygons.filter(p => p.id === state.selectedPolygonId || p.groupId === selected.groupId);
+          }
+          return state.polygons.filter(p => p.id === state.selectedPolygonId);
       }
       return state.polygons;
   }, [state.polygons, state.selectedPolygonId, state.isJoinMode, state.isDrawingMode, state.isFocused]);
@@ -358,7 +364,12 @@ export const Canvas: React.FC = () => {
             {/* EXISTING POLYGONS */}
             {visiblePolygons.map((poly) => {
                 const isSelected = state.selectedPolygonId === poly.id;
-                const isDimmed = (state.isJoinMode && poly.id !== state.selectedPolygonId) || state.isDrawingMode || (state.isFocused && !isSelected); 
+                // isDimmed logic: If in Join Mode, dim everyone EXCEPT selected AND Locked (candidates)
+                const isCandidate = state.isJoinMode && poly.isLocked && poly.id !== state.selectedPolygonId;
+                
+                const isDimmed = (state.isJoinMode && poly.id !== state.selectedPolygonId && !isCandidate) || 
+                                 state.isDrawingMode || 
+                                 (state.isFocused && !isSelected); 
                 
                 // Rotation Handle Position (Above Topmost Vertex)
                 let rotationHandle = null;
@@ -563,6 +574,8 @@ export const Canvas: React.FC = () => {
                         const isConnectedToSelectedEdge = state.selectedEdgeIds.length > 0
                             ? poly.edges.some(e => state.selectedEdgeIds.includes(e.id) && (e.startVertexId === vertex.id || e.endVertexId === vertex.id))
                             : false;
+                        
+                        const isLocked = poly.isLocked;
 
                         const labelY = vertex.y - (15 / state.zoomLevel);
                         const hitRadius = Math.max(30 / state.zoomLevel, 20);
@@ -599,6 +612,14 @@ export const Canvas: React.FC = () => {
                             <g key={vertex.id} 
                                onPointerDown={(e) => {
                                    if (state.isJoinMode || state.isDrawingMode) return; 
+                                   
+                                   // Prevent drag if locked
+                                   if (isLocked) {
+                                       interactionTypeRef.current = 'vertex'; // Mark as vertex click but don't set drag ref
+                                       dispatch({ type: 'SHOW_MESSAGE', payload: { type: 'error', text: 'Shape is locked. Modify a length to unlock.'} });
+                                       return;
+                                   }
+
                                    interactionTypeRef.current = 'vertex';
                                    draggedVertexRef.current = vertex.id;
                                    dragStartPosRef.current = { x: e.clientX, y: e.clientY };
@@ -610,7 +631,7 @@ export const Canvas: React.FC = () => {
                                        dispatch({ type: 'TOGGLE_VERTEX_SELECTION', payload: vertex.id });
                                    }
                                }}
-                               className={state.isDrawingMode ? "" : "cursor-move"}
+                               className={state.isDrawingMode ? "" : (isLocked ? "cursor-not-allowed" : "cursor-move")}
                             >
                                 {angleMarker}
 
@@ -626,8 +647,8 @@ export const Canvas: React.FC = () => {
                                     cx={vertex.x}
                                     cy={vertex.y}
                                     r={state.zoomLevel > 0.5 ? 8 / state.zoomLevel : 16}
-                                    fill={hasError ? '#ef4444' : (isVertexSelected ? '#38bdf8' : (isConnectedToSelectedEdge ? '#bae6fd' : (state.theme === 'dark' ? '#f8fafc' : '#ffffff')))}
-                                    stroke={hasError ? '#7f1d1d' : (isConnectedToSelectedEdge ? '#0284c7' : '#0ea5e9')}
+                                    fill={hasError ? '#ef4444' : (isVertexSelected ? '#38bdf8' : (isConnectedToSelectedEdge ? '#bae6fd' : (isLocked ? (state.theme === 'dark' ? '#334155' : '#e2e8f0') : (state.theme === 'dark' ? '#f8fafc' : '#ffffff'))))}
+                                    stroke={hasError ? '#7f1d1d' : (isConnectedToSelectedEdge ? '#0284c7' : (isLocked ? (state.theme === 'dark' ? '#475569' : '#94a3b8') : '#0ea5e9'))}
                                     strokeWidth={isVertexSelected || isConnectedToSelectedEdge ? 3 / state.zoomLevel : 2 / state.zoomLevel}
                                     className="pointer-events-none"
                                 />
