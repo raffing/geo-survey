@@ -1,5 +1,4 @@
 
-
 import { Point, Vertex, Edge, EdgeType, Polygon } from '../types';
 
 export const PIXELS_PER_METER = 100;
@@ -146,31 +145,85 @@ export const translatePolygon = (poly: Polygon, dx: number, dy: number): Polygon
     };
 };
 
-/**
- * Aligns 'sourcePoly' to 'targetPoly' along their respective edges.
- * 
- * Logic:
- * 1. Identify winding order (CW/CCW) of both polygons to find "Inside" direction.
- * 2. Rotate Source so its edge is parallel/anti-parallel to Target edge such that
- *    the "Insides" face away from each other.
- * 3. Translate Source so edges align (Centered) + Offset + Thickness Gap.
- */
-export const alignPolygonToEdge = (
+export const duplicatePolygon = (poly: Polygon): Polygon => {
+    const idMap = new Map<string, string>();
+    const newId = `poly-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+    
+    // Offset slightly
+    const offset = 30;
+
+    const newVertices = poly.vertices.map(v => {
+        const newVId = `${newId}-v${Math.random().toString(36).substr(2, 5)}`;
+        idMap.set(v.id, newVId);
+        return { ...v, id: newVId, x: v.x + offset, y: v.y + offset };
+    });
+
+    const newEdges = poly.edges.map(e => {
+        const newEId = `${newId}-e${Math.random().toString(36).substr(2, 5)}`;
+        return {
+            ...e,
+            id: newEId,
+            startVertexId: idMap.get(e.startVertexId)!,
+            endVertexId: idMap.get(e.endVertexId)!,
+            linkedEdgeId: undefined, // Detach connections
+            alignmentOffset: undefined
+        };
+    });
+
+    return {
+        ...poly,
+        id: newId,
+        name: `${poly.name} (Copy)`,
+        vertices: newVertices,
+        edges: newEdges,
+        centroid: calculateCentroid(newVertices),
+        groupId: undefined, // Detach from group
+        isLocked: poly.isLocked // Maintain locked state logic? Usually a copy keeps shape but is free. Let's keep it locked if original was solved.
+    };
+};
+
+export const mirrorPolygon = (poly: Polygon, axis: 'X' | 'Y', pivot: Point): Polygon => {
+    const newVertices = poly.vertices.map(v => {
+        let x = v.x;
+        let y = v.y;
+        
+        if (axis === 'X') {
+            // Flip Horizontal (across vertical line at pivot.x)
+            x = pivot.x - (x - pivot.x);
+        } else {
+            // Flip Vertical (across horizontal line at pivot.y)
+            y = pivot.y - (y - pivot.y);
+        }
+        return { ...v, x, y };
+    });
+    
+    // When mirroring, winding order reverses (CW becomes CCW). 
+    // This can break "External Join" logic which relies on winding.
+    // We should reverse the vertex array order to preserve geometric winding properties relative to "Inside/Outside".
+    // However, the ID mapping for edges needs to stay consistent.
+    
+    return {
+        ...poly,
+        vertices: newVertices,
+        centroid: calculateCentroid(newVertices)
+    };
+};
+
+export const calculateAlignmentTransform = (
     sourcePoly: Polygon, 
     sourceEdgeId: string, 
     targetPoly: Polygon, 
     targetEdgeId: string,
     offset: number = 0, // Linear sliding offset from center
     perpendicularDist: number = 0 // Thickness spacing (Meters)
-): Polygon => {
+): { rotation: number, dx: number, dy: number } => {
     // 1. Get Coordinates
     const sEdge = sourcePoly.edges.find(e => e.id === sourceEdgeId);
     const tEdge = targetPoly.edges.find(e => e.id === targetEdgeId);
-    if (!sEdge || !tEdge) return sourcePoly;
+    if (!sEdge || !tEdge) return { rotation: 0, dx: 0, dy: 0 };
 
     const sV1 = sourcePoly.vertices.find(v => v.id === sEdge.startVertexId)!;
     const sV2 = sourcePoly.vertices.find(v => v.id === sEdge.endVertexId)!;
-    
     const tV1 = targetPoly.vertices.find(v => v.id === tEdge.startVertexId)!;
     const tV2 = targetPoly.vertices.find(v => v.id === tEdge.endVertexId)!;
 
@@ -180,12 +233,9 @@ export const alignPolygonToEdge = (
     const sIsCW = sArea > 0;
     const tIsCW = tArea > 0;
 
-    // Edge Angles
     const angleSource = Math.atan2(sV2.y - sV1.y, sV2.x - sV1.x);
     const angleTarget = Math.atan2(tV2.y - tV1.y, tV2.x - tV1.x);
 
-    // Calculate Inward Normal Angle (relative to edge vector)
-    // CW: Normal is +90 deg. CCW: Normal is -90 deg.
     const sNormalAngleRel = sIsCW ? Math.PI / 2 : -Math.PI / 2;
     const tNormalAngleRel = tIsCW ? Math.PI / 2 : -Math.PI / 2;
 
@@ -193,48 +243,91 @@ export const alignPolygonToEdge = (
     const tNormalAngle = angleTarget + tNormalAngleRel;
 
     // 3. Determine Required Rotation
-    // We want transformed Source Normal to be opposite to Target Normal
-    // Target Normal + PI = Source Normal + Rotation
-    // Rotation = Target Normal + PI - Source Normal
     const rotationNeeded = tNormalAngle + Math.PI - sNormalAngle;
 
-    // Rotate Source around its centroid
-    const rotated = rotatePolygon(sourcePoly, sourcePoly.centroid, rotationNeeded);
+    // 4. Determine Translation
+    // We calculate where the Source Centroid SHOULD be after rotation + translation
     
-    // Get rotated vertices
-    const rV1 = rotated.vertices.find(v => v.id === sV1.id)!;
-    const rV2 = rotated.vertices.find(v => v.id === sV2.id)!;
+    // Rotate Source Centroid around itself? No, rotation is around centroid.
+    // So centroid stays at (cx, cy) during rotation.
+    // We need to find the vector from Rotated Edge Midpoint to Target Position.
     
-    // 4. Calculate Midpoints
-    const rMid = { x: (rV1.x + rV2.x) / 2, y: (rV1.y + rV2.y) / 2 };
+    // Simulate Rotation of Edge Midpoint
+    const sMid = { x: (sV1.x + sV2.x) / 2, y: (sV1.y + sV2.y) / 2 };
+    const rotatedSMid = rotatePoint(sMid, sourcePoly.centroid, rotationNeeded);
+    
     const tMid = { x: (tV1.x + tV2.x) / 2, y: (tV1.y + tV2.y) / 2 };
 
-    // 5. Calculate Positioning Vectors
-    // We want to position Source at: TargetMid + (OutwardNormal * Gap) + (EdgeDir * Offset)
-    
-    // Target Outward Normal = Opposite of Inward Normal
-    // Angle = tNormalAngle + PI
+    // Target Position
     const tOutAngle = tNormalAngle + Math.PI;
     const nx = Math.cos(tOutAngle);
     const ny = Math.sin(tOutAngle);
 
-    // Target Edge Direction Unit Vector
     const tLen = distance(tV1, tV2);
     const ux = (tV2.x - tV1.x) / tLen;
     const uy = (tV2.y - tV1.y) / tLen;
 
-    // Distances in Pixels
     const distPx = perpendicularDist * PIXELS_PER_METER;
     const offsetPx = offset * PIXELS_PER_METER;
 
     const targetX = tMid.x + (nx * distPx) + (ux * offsetPx);
     const targetY = tMid.y + (ny * distPx) + (uy * offsetPx);
 
-    // 6. Translate Source Midpoint to Target Point
-    const dx = targetX - rMid.x;
-    const dy = targetY - rMid.y;
+    const dx = targetX - rotatedSMid.x;
+    const dy = targetY - rotatedSMid.y;
+
+    return { rotation: rotationNeeded, dx, dy };
+};
+
+/**
+ * Calculates the offset required to project Source Edge onto Target Edge 
+ * based on their current visual positions, effectively allowing "snap in place".
+ * The returned offset is in Meters, relative to the center alignment.
+ */
+export const calculateProjectedOffset = (
+    sV1: Vertex, sV2: Vertex,
+    tV1: Vertex, tV2: Vertex
+): number => {
+    const sMid = { x: (sV1.x + sV2.x) / 2, y: (sV1.y + sV2.y) / 2 };
+    const tMid = { x: (tV1.x + tV2.x) / 2, y: (tV1.y + tV2.y) / 2 };
+
+    const dx = tV2.x - tV1.x;
+    const dy = tV2.y - tV1.y;
+    const len = Math.sqrt(dx*dx + dy*dy);
+    if (len === 0) return 0;
+
+    const ux = dx / len;
+    const uy = dy / len;
+
+    // Vector from Target Midpoint to Source Midpoint
+    const diffX = sMid.x - tMid.x;
+    const diffY = sMid.y - tMid.y;
+
+    // Project diff onto unit vector of Target
+    const offsetPx = diffX * ux + diffY * uy;
     
-    return translatePolygon(rotated, dx, dy);
+    // Convert to meters
+    return offsetPx / PIXELS_PER_METER;
+}
+
+/**
+ * Aligns 'sourcePoly' to 'targetPoly' along their respective edges.
+ * Uses calculateAlignmentTransform internally.
+ */
+export const alignPolygonToEdge = (
+    sourcePoly: Polygon, 
+    sourceEdgeId: string, 
+    targetPoly: Polygon, 
+    targetEdgeId: string,
+    offset: number = 0,
+    perpendicularDist: number = 0
+): Polygon => {
+    const transform = calculateAlignmentTransform(sourcePoly, sourceEdgeId, targetPoly, targetEdgeId, offset, perpendicularDist);
+    
+    // 1. Rotate
+    const rotated = rotatePolygon(sourcePoly, sourcePoly.centroid, transform.rotation);
+    // 2. Translate
+    return translatePolygon(rotated, transform.dx, transform.dy);
 };
 
 // --- Intersection Logic (for validation) ---
@@ -456,160 +549,149 @@ export const solveGeometry = (polygon: Polygon): { polygon: Polygon, metricError
     for (const vTarget of vertices) {
       if (solved.has(vTarget.id)) continue;
 
-      const connectedEdges = effectiveEdges.filter(e => 
-        e.startVertexId === vTarget.id || e.endVertexId === vTarget.id
+      const connected = effectiveEdges.filter(e => 
+        (e.startVertexId === vTarget.id && solved.has(e.endVertexId)) ||
+        (e.endVertexId === vTarget.id && solved.has(e.startVertexId))
       );
 
-      const solvedNeighbors: { vertex: Vertex, edgeLen: number }[] = [];
+      if (connected.length >= 2) {
+        // Sort by id for determinism or just take first two
+        const e1 = connected[0];
+        const e2 = connected[1];
 
-      for (const edge of connectedEdges) {
-        const neighborId = edge.startVertexId === vTarget.id ? edge.endVertexId : edge.startVertexId;
-        if (solved.has(neighborId)) {
-          solvedNeighbors.push({
-            vertex: vertexMap.get(neighborId)!,
-            edgeLen: edge.length * PIXELS_PER_METER
-          });
-        }
-      }
+        const p1Id = e1.startVertexId === vTarget.id ? e1.endVertexId : e1.startVertexId;
+        const p2Id = e2.startVertexId === vTarget.id ? e2.endVertexId : e2.startVertexId;
 
-      if (solvedNeighbors.length >= 2) {
-        const anchor1 = solvedNeighbors[0];
-        const anchor2 = solvedNeighbors[1];
+        const p1 = vertexMap.get(p1Id)!;
+        const p2 = vertexMap.get(p2Id)!;
 
-        const result = findIntersection(
-          anchor1.vertex, anchor1.edgeLen,
-          anchor2.vertex, anchor2.edgeLen,
-          vTarget 
-        );
+        const r1 = e1.length * PIXELS_PER_METER;
+        const r2 = e2.length * PIXELS_PER_METER;
+
+        const result = findIntersection(p1, r1, p2, r2, vTarget);
 
         if (result.type === 'success') {
-          if (result.approximated) isApproximated = true;
-
-          const updatedV = { ...vTarget, x: result.point.x, y: result.point.y };
-          vertexMap.set(vTarget.id, updatedV);
-          
-          const idx = vertices.findIndex(v => v.id === vTarget.id);
-          if (idx !== -1) vertices[idx] = updatedV;
-
-          solved.add(vTarget.id);
-          progress = true; 
+             const newV = { ...vTarget, x: result.point.x, y: result.point.y, solved: true };
+             vertexMap.set(vTarget.id, newV);
+             const idx = vertices.findIndex(v => v.id === vTarget.id);
+             if (idx !== -1) vertices[idx] = newV;
+             
+             solved.add(vTarget.id);
+             progress = true;
+             if (result.approximated) isApproximated = true;
         } else {
-             metricError = `Measurement Error: Edges do not meet at Vertex ${vTarget.label}.`;
+             if (!metricError) {
+                 if (result.code === 'SEPARATED') metricError = `Geometric conflict: Edge lengths around ${vTarget.label} are too short to connect.`;
+                 if (result.code === 'CONTAINED') metricError = `Geometric conflict: Edge lengths around ${vTarget.label} are impossible (one contained in other).`;
+             }
         }
       }
     }
   }
 
-  const finalVertices = vertices.map(v => ({
-      ...v,
-      solved: solved.has(v.id)
-  }));
+  // Update remaining vertices as unsolved if not reached
+  vertices = vertices.map(v => solved.has(v.id) ? v : { ...v, solved: false });
 
-  return {
-    polygon: {
-        ...polygon,
-        vertices: finalVertices,
-        centroid: calculateCentroid(finalVertices)
-    },
-    metricError,
-    approximated: isApproximated
+  // If we have solved all vertices, we should also check if we have any "extra" edges that are now violated
+  // e.g. a diagonal that was not used for triangulation but exists. 
+  // For simplicity, we assume if triangulation succeeded, it's good, but we can check consistency.
+  
+  if (vertices.some(v => !v.solved) && !metricError) {
+      metricError = "Insufficient constraints to fully solve geometry.";
+  }
+
+  return { 
+      polygon: {
+          ...polygon,
+          vertices: vertices,
+          centroid: calculateCentroid(vertices)
+      },
+      metricError,
+      approximated: isApproximated
   };
 };
 
-export const generateRegularPolygon = (
-    center: Point, 
-    sides: number, 
-    idBase: string, 
-    name?: string
-): Polygon => {
-  const radius = 150;
-  const vertices: Vertex[] = [];
-  const validSides = Math.max(3, sides);
-  const startAngle = validSides === 4 ? -Math.PI / 4 : -Math.PI / 2;
+export const generateRegularPolygon = (center: Point, sides: number, id: string, name: string): Polygon => {
+    const radius = 150; 
+    const vertices: Vertex[] = [];
+    const edges: Edge[] = [];
+    const angleStep = (2 * Math.PI) / sides;
 
-  for (let i = 0; i < validSides; i++) {
-    const angle = startAngle + (i * 2 * Math.PI) / validSides; 
-    vertices.push({
-      id: `${idBase}-v${i}`,
-      x: center.x + radius * Math.cos(angle),
-      y: center.y + radius * Math.sin(angle),
-      label: String.fromCharCode(65 + i),
-      solved: true 
-    });
-  }
+    for (let i = 0; i < sides; i++) {
+        const angle = i * angleStep - Math.PI / 2;
+        const x = center.x + radius * Math.cos(angle);
+        const y = center.y + radius * Math.sin(angle);
+        vertices.push({
+            id: `${id}-v${i}`,
+            x,
+            y,
+            label: String.fromCharCode(65 + i),
+            solved: true
+        });
+    }
 
-  const edges: Edge[] = [];
-  
-  for (let i = 0; i < validSides; i++) {
-    const next = (i + 1) % validSides;
-    const v1 = vertices[i];
-    const v2 = vertices[next];
-    const len = distance(v1, v2);
-    
-    edges.push({
-      id: `${idBase}-e-p${i}`,
-      startVertexId: v1.id,
-      endVertexId: v2.id,
-      length: parseFloat((len / PIXELS_PER_METER).toFixed(2)),
-      type: EdgeType.PERIMETER,
-      thickness: 10 
-    });
-  }
+    for (let i = 0; i < sides; i++) {
+        const next = (i + 1) % sides;
+        const v1 = vertices[i];
+        const v2 = vertices[next];
+        const len = distance(v1, v2);
+        edges.push({
+            id: `${id}-e${i}`,
+            startVertexId: v1.id,
+            endVertexId: v2.id,
+            length: parseFloat((len / PIXELS_PER_METER).toFixed(2)),
+            type: EdgeType.PERIMETER,
+            thickness: 10
+        });
+    }
 
-  if (validSides > 3) {
-      for (let i = 2; i < validSides - 1; i++) {
-          const vStart = vertices[0];
-          const vEnd = vertices[i];
-          const len = distance(vStart, vEnd);
-          
-          edges.push({
-              id: `${idBase}-e-d${i}`,
-              startVertexId: vStart.id,
-              endVertexId: vEnd.id,
-              length: parseFloat((len / PIXELS_PER_METER).toFixed(2)),
-              type: EdgeType.DIAGONAL
-          });
-      }
-  }
-
-  return {
-    id: idBase,
-    name: name || `Polygon ${validSides}`,
-    vertices,
-    edges,
-    centroid: calculateCentroid(vertices),
-    isClosed: true
-  };
+    return {
+        id,
+        name,
+        vertices,
+        edges,
+        centroid: calculateCentroid(vertices),
+        isClosed: true,
+        isLocked: false 
+    };
 };
 
 export const generateDXF = (polygons: Polygon[]): string => {
-    let dxf = "0\nSECTION\n2\nENTITIES\n";
+    let s = "0\nSECTION\n2\nHEADER\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n";
     
-    polygons.forEach(poly => {
-        poly.edges.forEach(edge => {
-            const v1 = poly.vertices.find(v => v.id === edge.startVertexId);
-            const v2 = poly.vertices.find(v => v.id === edge.endVertexId);
-            if (v1 && v2) {
-                const layer = edge.type === EdgeType.PERIMETER ? "WALLS" : "DIAGONALS";
-                const color = edge.type === EdgeType.PERIMETER ? "7" : "252"; 
-                
-                dxf += "0\nLINE\n8\n" + layer + "\n62\n" + color + "\n";
-                dxf += "10\n" + (v1.x / PIXELS_PER_METER).toFixed(4) + "\n"; 
-                dxf += "20\n" + (-v1.y / PIXELS_PER_METER).toFixed(4) + "\n"; 
-                dxf += "11\n" + (v2.x / PIXELS_PER_METER).toFixed(4) + "\n"; 
-                dxf += "21\n" + (-v2.y / PIXELS_PER_METER).toFixed(4) + "\n"; 
-            }
-        });
-
-        poly.vertices.forEach(v => {
-             dxf += "0\nTEXT\n8\nLABELS\n62\n3\n"; 
-             dxf += "10\n" + (v.x / PIXELS_PER_METER).toFixed(4) + "\n";
-             dxf += "20\n" + (-v.y / PIXELS_PER_METER).toFixed(4) + "\n";
-             dxf += "40\n0.2\n"; 
-             dxf += "1\n" + v.label + "\n";
-        });
-    });
-
-    dxf += "0\nENDSEC\n0\nEOF\n";
-    return dxf;
-};
+    for (const poly of polygons) {
+        for (const edge of poly.edges) {
+             const v1 = poly.vertices.find(v => v.id === edge.startVertexId);
+             const v2 = poly.vertices.find(v => v.id === edge.endVertexId);
+             if (v1 && v2) {
+                 const x1 = v1.x / PIXELS_PER_METER;
+                 const y1 = -v1.y / PIXELS_PER_METER; // Invert Y for CAD
+                 const x2 = v2.x / PIXELS_PER_METER;
+                 const y2 = -v2.y / PIXELS_PER_METER;
+                 
+                 s += "0\nLINE\n";
+                 s += "8\n" + (edge.type === EdgeType.PERIMETER ? "WALLS" : "DIAGONALS") + "\n";
+                 s += "10\n" + x1.toFixed(4) + "\n";
+                 s += "20\n" + y1.toFixed(4) + "\n";
+                 s += "30\n0.0\n";
+                 s += "11\n" + x2.toFixed(4) + "\n";
+                 s += "21\n" + y2.toFixed(4) + "\n";
+                 s += "31\n0.0\n";
+             }
+        }
+        
+        const c = poly.centroid;
+        const cx = c.x / PIXELS_PER_METER;
+        const cy = -c.y / PIXELS_PER_METER;
+        s += "0\nTEXT\n";
+        s += "8\nLABELS\n";
+        s += "10\n" + cx.toFixed(4) + "\n";
+        s += "20\n" + cy.toFixed(4) + "\n";
+        s += "30\n0.0\n";
+        s += "40\n0.2\n"; 
+        s += "1\n" + poly.name + "\n";
+    }
+    
+    s += "0\nENDSEC\n0\nEOF\n";
+    return s;
+}

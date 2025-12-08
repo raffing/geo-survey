@@ -1,13 +1,12 @@
 
-
 import React, { createContext, useContext, useReducer, ReactNode } from 'react';
 import { AppState, Action, Polygon, EdgeType, Edge, HistoryEntry, Vertex } from '../types';
-import { solveGeometry, distance, checkConnectionStatus, alignPolygonToEdge, calculateCentroid, midPoint, calculatePolygonArea, rotatePolygon, PIXELS_PER_METER, rotatePoint, translatePolygon, recalculateGroups, getConnectedPolygonGroup } from '../utils/geometry';
+import { solveGeometry, distance, checkConnectionStatus, alignPolygonToEdge, calculateCentroid, midPoint, calculatePolygonArea, rotatePolygon, PIXELS_PER_METER, rotatePoint, translatePolygon, recalculateGroups, getConnectedPolygonGroup, duplicatePolygon, mirrorPolygon, calculateAlignmentTransform, calculateProjectedOffset } from '../utils/geometry';
 
 const initialState: AppState = {
   theme: 'light',
   polygons: [],
-  selectedPolygonId: null,
+  selectedPolygonIds: [],
   selectedEdgeIds: [],
   selectedVertexIds: [],
   openVertexMenuId: null,
@@ -20,6 +19,8 @@ const initialState: AppState = {
   isJoinMode: false,
   joinSourceEdgeId: null,
   joinConflict: null,
+  alignState: null,
+  contextMenu: null,
   isDrawingMode: false,
   drawingPoints: [],
   past: [],
@@ -29,7 +30,7 @@ const initialState: AppState = {
 // Helper to create a lightweight snapshot of the domain data
 const createSnapshot = (state: AppState): HistoryEntry => ({
     polygons: state.polygons,
-    selectedPolygonId: state.selectedPolygonId,
+    selectedPolygonIds: state.selectedPolygonIds,
     selectedEdgeIds: state.selectedEdgeIds,
     selectedVertexIds: state.selectedVertexIds
 });
@@ -43,7 +44,7 @@ const withHistory = (state: AppState): AppState => {
 };
 
 // --- CORE JOIN LOGIC ---
-const executeJoin = (state: AppState, sourceEdgeId: string, targetEdgeId: string, thickness: number): AppState => {
+const executeJoin = (state: AppState, sourceEdgeId: string, targetEdgeId: string, thickness: number, initialOffset: number = 0): AppState => {
     const sourcePoly = state.polygons.find(p => p.edges.some(e => e.id === sourceEdgeId));
     const targetPoly = state.polygons.find(p => p.edges.some(e => e.id === targetEdgeId));
 
@@ -54,8 +55,9 @@ const executeJoin = (state: AppState, sourceEdgeId: string, targetEdgeId: string
     const updatedTargetEdges = targetPoly.edges.map(e => e.id === targetEdgeId ? { ...e, thickness: thickness } : e);
     
     // --- ALIGNMENT LOGIC (CENTER + THICKNESS GAP) ---
-    // 1. Initial Offset: 0 means align Center-to-Center.
-    const offset = 0;
+    // offset: 0 means align Center-to-Center.
+    // initialOffset allows passing a specific projection offset for "in-place" join
+    const offset = initialOffset;
     
     // 2. Thickness Spacing
     // gapMeters is derived from the chosen thickness (cm -> m)
@@ -132,7 +134,7 @@ const executeJoin = (state: AppState, sourceEdgeId: string, targetEdgeId: string
         joinSourceEdgeId: null,
         joinConflict: null,
         solverMsg: { type: 'success', text: 'Polygons joined and grouped.' },
-        selectedPolygonId: finalSourcePoly.id,
+        selectedPolygonIds: [finalSourcePoly.id],
         selectedEdgeIds: [sourceEdgeId]
     };
 };
@@ -158,7 +160,8 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
             openVertexMenuId: null,
             isDrawingMode: false, // Cancel drawing on Undo global
             drawingPoints: [],
-            joinConflict: null
+            joinConflict: null,
+            contextMenu: null
         };
     }
 
@@ -175,7 +178,8 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
             past: [...state.past, currentSnapshot], // Push current to past
             future: newFuture,
             solverMsg: null,
-            openVertexMenuId: null
+            openVertexMenuId: null,
+            contextMenu: null
         };
     }
 
@@ -187,7 +191,7 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
         return {
             ...withHistory(state),
             polygons: action.payload,
-            selectedPolygonId: null,
+            selectedPolygonIds: [],
             selectedEdgeIds: [],
             selectedVertexIds: [],
             solverMsg: { type: 'success', text: 'Data imported successfully.' }
@@ -198,7 +202,7 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
         return {
             ...withHistory(state),
             polygons: [],
-            selectedPolygonId: null,
+            selectedPolygonIds: [],
             selectedEdgeIds: [],
             selectedVertexIds: [],
             openVertexMenuId: null,
@@ -211,7 +215,8 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
             isJoinMode: false,
             joinSourceEdgeId: null,
             joinConflict: null,
-            isFocused: false
+            isFocused: false,
+            contextMenu: null
         };
     }
 
@@ -222,11 +227,12 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
             ...state,
             isDrawingMode: true,
             drawingPoints: [],
-            selectedPolygonId: null, // Deselect everything to focus on drawing
+            selectedPolygonIds: [], // Deselect everything to focus on drawing
             selectedEdgeIds: [],
             selectedVertexIds: [],
             isJoinMode: false,
-            openVertexMenuId: null
+            openVertexMenuId: null,
+            contextMenu: null
         };
 
     case 'ADD_DRAWING_POINT':
@@ -299,7 +305,7 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
             polygons: [...state.polygons, newPoly],
             isDrawingMode: false,
             drawingPoints: [],
-            selectedPolygonId: newPoly.id,
+            selectedPolygonIds: [newPoly.id],
             solverMsg: { type: 'success', text: 'Polygon created! Measurements can be edited.' }
         };
     }
@@ -310,34 +316,61 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
       return {
         ...withHistory(state),
         polygons: [...state.polygons, action.payload],
-        selectedPolygonId: action.payload.id,
+        selectedPolygonIds: [action.payload.id],
         selectedVertexIds: [],
         selectedEdgeIds: [],
         solverMsg: null
       };
 
     case 'SELECT_POLYGON': {
-      const payloadId = typeof action.payload === 'object' && action.payload !== null ? action.payload.id : action.payload as string | null;
-      const shouldFocus = typeof action.payload === 'object' && action.payload !== null ? action.payload.shouldFocus : false;
+      let payloadId: string | null = null;
+      let shouldFocus = false;
+      let multi = false;
 
-      if (payloadId === state.selectedPolygonId) {
-          // If explicitly requested to focus (from list), update focus state
-          if (shouldFocus && !state.isFocused) {
-              return { ...state, isFocused: true };
+      if (typeof action.payload === 'object' && action.payload !== null) {
+          payloadId = action.payload.id;
+          shouldFocus = action.payload.shouldFocus || false;
+          multi = action.payload.multi || false;
+      } else {
+          payloadId = action.payload as string | null;
+      }
+
+      // If null, clear all
+      if (payloadId === null) {
+          return {
+              ...state,
+              selectedPolygonIds: [],
+              selectedEdgeIds: [],
+              selectedVertexIds: [],
+              isFocused: false,
+              isJoinMode: false,
+              contextMenu: null
+          };
+      }
+
+      let newSelectedIds = [...state.selectedPolygonIds];
+
+      if (multi) {
+          if (newSelectedIds.includes(payloadId)) {
+              newSelectedIds = newSelectedIds.filter(id => id !== payloadId);
+          } else {
+              newSelectedIds.push(payloadId);
           }
-          return state;
+      } else {
+          newSelectedIds = [payloadId];
       }
 
       return { 
         ...state, 
-        selectedPolygonId: payloadId,
+        selectedPolygonIds: newSelectedIds,
         selectedEdgeIds: [],
         selectedVertexIds: [],
         openVertexMenuId: null,
         isJoinMode: false,
         joinSourceEdgeId: null,
         isDrawingMode: false, // Exit drawing if selecting elsewhere
-        isFocused: shouldFocus || false // Default to false (Context mode) unless specified
+        isFocused: shouldFocus || false, // Default to false (Context mode) unless specified
+        contextMenu: null // Close context menu on selection
       };
     }
 
@@ -353,6 +386,15 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
           isMulti = false;
       }
       
+      // ALIGN MODE SELECTION LOGIC
+      if (state.alignState) {
+            if (edgeId) {
+                return surveyReducer(state, { type: 'SELECT_ALIGN_EDGE', payload: edgeId });
+            } else {
+                return state; 
+            }
+      }
+
       if (state.isJoinMode && state.joinSourceEdgeId && edgeId) {
           return surveyReducer(state, { type: 'COMPLETE_JOIN', payload: edgeId });
       }
@@ -364,20 +406,30 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
       const poly = state.polygons.find(p => p.edges.some(e => e.id === edgeId));
       if (!poly) return state;
 
-      const isNewPoly = state.selectedPolygonId !== poly.id;
+      // Update Polygon Selection logic
+      let newSelectedPolyIds = [...state.selectedPolygonIds];
       
+      if (isMulti) {
+          // If multi, ensure polygon is added to selection if not present
+          if (!newSelectedPolyIds.includes(poly.id)) {
+              newSelectedPolyIds.push(poly.id);
+          }
+      } else {
+          // Single select: Replace poly selection unless it was already the only one
+           if (!newSelectedPolyIds.includes(poly.id) || newSelectedPolyIds.length > 1) {
+               newSelectedPolyIds = [poly.id];
+           }
+      }
+
+      // Edge Selection Logic
       let newSelection: string[] = [];
 
-      // Simple selection logic (multi flag supported but UI now uses single click)
-      if (isMulti && !isNewPoly) {
+      if (isMulti) {
           newSelection = [...state.selectedEdgeIds];
           if (newSelection.includes(edgeId)) {
               newSelection = newSelection.filter(id => id !== edgeId);
           } else {
               newSelection.push(edgeId);
-              if (newSelection.length > 2) {
-                  newSelection.shift(); 
-              }
           }
       } else {
           newSelection = [edgeId];
@@ -385,10 +437,11 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
 
       return { 
         ...state, 
-        selectedPolygonId: poly.id,
+        selectedPolygonIds: newSelectedPolyIds,
         selectedEdgeIds: newSelection,
         selectedVertexIds: [],
-        openVertexMenuId: null // Close vertex menu on edge select
+        openVertexMenuId: null, // Close vertex menu on edge select
+        contextMenu: null
       };
     }
 
@@ -398,12 +451,12 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
         if (!poly) return state;
 
         if (poly.isLocked) {
-             return { ...state, solverMsg: { type: 'error', text: 'Cannot split edge on a locked polygon. Modify a length to unlock.' } };
+             return { ...state, solverMsg: { type: 'error', text: 'Cannot split edge on a locked polygon. Modify a length to unlock.' }, contextMenu: null };
         }
 
         const edge = poly.edges.find(e => e.id === edgeId);
         if (!edge || edge.type !== EdgeType.PERIMETER) {
-            return { ...state, solverMsg: { type: 'error', text: 'Can only split perimeter edges.' } };
+            return { ...state, solverMsg: { type: 'error', text: 'Can only split perimeter edges.' }, contextMenu: null };
         }
 
         const vStart = poly.vertices.find(v => v.id === edge.startVertexId);
@@ -466,7 +519,8 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
             polygons: newPolygons,
             selectedEdgeIds: [], // Deselect the split edge
             selectedVertexIds: [newVertexId], // Select the new node for immediate adjustment
-            solverMsg: { type: 'success', text: 'Edge split. Node added.' }
+            solverMsg: { type: 'success', text: 'Edge split. Node added.' },
+            contextMenu: null
         };
     }
 
@@ -475,7 +529,8 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
         const poly = state.polygons.find(p => p.vertices.some(v => v.id === vId));
         if (!poly) return state;
 
-        const isNewPoly = state.selectedPolygonId !== poly.id;
+        const isNewPoly = !state.selectedPolygonIds.includes(poly.id);
+        
         let newSelection = isNewPoly ? [] : [...state.selectedVertexIds];
 
         if (newSelection.includes(vId)) {
@@ -489,7 +544,7 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
 
         return {
             ...state,
-            selectedPolygonId: poly.id,
+            selectedPolygonIds: [poly.id], // Vertex select switches to single poly focus usually
             selectedVertexIds: newSelection,
             selectedEdgeIds: [],
             openVertexMenuId: vId // Auto-open menu on select/tap
@@ -508,14 +563,15 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
         if (!poly) return state;
 
         if (poly.isLocked) {
-             return { ...state, solverMsg: { type: 'error', text: 'Cannot delete vertex on a locked polygon.' } };
+             return { ...state, solverMsg: { type: 'error', text: 'Cannot delete vertex on a locked polygon.' }, contextMenu: null };
         }
 
         // Minimum constraint: Triangle
         if (poly.vertices.length <= 3) {
             return {
                 ...state,
-                solverMsg: { type: 'error', text: 'Cannot delete vertex: Minimum 3 points required.' }
+                solverMsg: { type: 'error', text: 'Cannot delete vertex: Minimum 3 points required.' },
+                contextMenu: null
             };
         }
 
@@ -562,7 +618,8 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
             polygons: newPolygons,
             selectedVertexIds: [],
             openVertexMenuId: null,
-            solverMsg: null
+            solverMsg: null,
+            contextMenu: null
         };
     }
 
@@ -595,7 +652,8 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
             ...withHistory(state),
             polygons: newPolygons,
             solverMsg: null,
-            openVertexMenuId: null // Close menu after setting
+            openVertexMenuId: null, // Close menu after setting
+            contextMenu: null
         };
     }
 
@@ -644,10 +702,8 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
         }
 
         // --- SINGLE JOIN CONSTRAINT ---
-        // Check if ANY edge in sourcePoly is already linked to targetPoly
         const alreadyLinked = sourcePoly.edges.some(e => {
             if (!e.linkedEdgeId) return false;
-            // Find which poly has this linked edge
             const linkedPoly = state.polygons.find(p => p.edges.some(le => le.id === e.linkedEdgeId));
             return linkedPoly?.id === targetPoly.id;
         });
@@ -677,14 +733,76 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
                     sourceEdgeId,
                     targetEdgeId,
                     sourceThickness: sThick,
-                    targetThickness: tThick
+                    targetThickness: tThick,
+                    initialOffset: 0
                 }
-                // Do NOT clear isJoinMode yet, wait for resolution
             };
         }
 
-        // If thicknesses match, proceed directly using helper
-        return executeJoin(state, sourceEdgeId, targetEdgeId, sThick);
+        return executeJoin(state, sourceEdgeId, targetEdgeId, sThick, 0);
+    }
+
+    case 'JOIN_SELECTED_EDGES': {
+        // Must have exactly 2 selected edges
+        if (state.selectedEdgeIds.length !== 2) return state;
+
+        const edge1Id = state.selectedEdgeIds[0];
+        const edge2Id = state.selectedEdgeIds[1];
+
+        const poly1 = state.polygons.find(p => p.edges.some(e => e.id === edge1Id));
+        const poly2 = state.polygons.find(p => p.edges.some(e => e.id === edge2Id));
+
+        if (!poly1 || !poly2 || poly1.id === poly2.id) {
+             return { ...state, solverMsg: { type: 'error', text: 'Must select edges from two DIFFERENT polygons.' } };
+        }
+
+        if (!poly1.isLocked || !poly2.isLocked) {
+            return { ...state, solverMsg: { type: 'error', text: 'Both polygons must be locked (solved) to join.' } };
+        }
+
+        // Check if already linked
+        const alreadyLinked = poly1.edges.some(e => {
+            if (!e.linkedEdgeId) return false;
+            const linkedPoly = state.polygons.find(p => p.edges.some(le => le.id === e.linkedEdgeId));
+            return linkedPoly?.id === poly2.id;
+        });
+
+        if (alreadyLinked) {
+             return { ...state, solverMsg: { type: 'error', text: 'Polygons are already joined.' } };
+        }
+
+        const edge1 = poly1.edges.find(e => e.id === edge1Id)!;
+        const edge2 = poly2.edges.find(e => e.id === edge2Id)!;
+
+        // Calculate Offset to keep them in current visual place
+        // We define Poly1 as Source for the calculation
+        const sV1 = poly1.vertices.find(v => v.id === edge1.startVertexId)!;
+        const sV2 = poly1.vertices.find(v => v.id === edge1.endVertexId)!;
+        const tV1 = poly2.vertices.find(v => v.id === edge2.startVertexId)!;
+        const tV2 = poly2.vertices.find(v => v.id === edge2.endVertexId)!;
+
+        const projectedOffset = calculateProjectedOffset(sV1, sV2, tV1, tV2);
+
+        // Thickness Check
+        const t1 = edge1.thickness || 10;
+        const t2 = edge2.thickness || 10;
+
+        if (t1 !== t2) {
+             return {
+                ...state,
+                joinConflict: {
+                    sourcePolyId: poly1.id,
+                    targetPolyId: poly2.id,
+                    sourceEdgeId: edge1Id,
+                    targetEdgeId: edge2Id,
+                    sourceThickness: t1,
+                    targetThickness: t2,
+                    initialOffset: projectedOffset
+                }
+            };
+        }
+
+        return executeJoin(state, edge1Id, edge2Id, t1, projectedOffset);
     }
 
     case 'RESOLVE_JOIN_CONFLICT': {
@@ -693,7 +811,7 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
 
         if (!conflict) return state;
 
-        return executeJoin(state, conflict.sourceEdgeId, conflict.targetEdgeId, thickness);
+        return executeJoin(state, conflict.sourceEdgeId, conflict.targetEdgeId, thickness, conflict.initialOffset);
     }
 
     case 'CANCEL_JOIN_CONFLICT':
@@ -789,11 +907,10 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
     }
 
     case 'ADD_DIAGONAL': {
-        if (state.selectedVertexIds.length !== 2 || !state.selectedPolygonId) return state;
+        if (state.selectedVertexIds.length !== 2 || state.selectedPolygonIds.length !== 1) return state;
         
-        const polyIndex = state.polygons.findIndex(p => p.id === state.selectedPolygonId);
-        if (polyIndex === -1) return state;
-        const poly = state.polygons[polyIndex];
+        const poly = state.polygons.find(p => p.id === state.selectedPolygonIds[0]);
+        if (!poly) return state;
         
         if (poly.isLocked) {
              return { ...state, solverMsg: { type: 'error', text: 'Cannot add diagonal to locked polygon. Edit a length to unlock.' } };
@@ -823,8 +940,7 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
         };
 
         const updatedPoly = { ...poly, edges: [...poly.edges, newEdge] };
-        const newPolygons = [...state.polygons];
-        newPolygons[polyIndex] = updatedPoly;
+        const newPolygons = state.polygons.map(p => p.id === poly.id ? updatedPoly : p);
 
         return {
             ...withHistory(state),
@@ -840,12 +956,12 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
         if (!poly) return state;
         
         if (poly.isLocked) {
-             return { ...state, solverMsg: { type: 'error', text: 'Cannot delete edge of locked polygon.' } };
+             return { ...state, solverMsg: { type: 'error', text: 'Cannot delete edge of locked polygon.' }, contextMenu: null };
         }
 
         const edgeToDelete = poly.edges.find(e => e.id === edgeId);
         if (!edgeToDelete || edgeToDelete.type === EdgeType.PERIMETER) {
-            return { ...state, solverMsg: { type: 'error', text: 'Cannot delete perimeter edges.' } };
+            return { ...state, solverMsg: { type: 'error', text: 'Cannot delete perimeter edges.' }, contextMenu: null };
         }
 
         const updatedPoly = {
@@ -859,7 +975,8 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
             ...withHistory(state),
             polygons: newPolygons,
             selectedEdgeIds: [],
-            solverMsg: null
+            solverMsg: null,
+            contextMenu: null
         };
     }
     
@@ -985,6 +1102,10 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
             if (p.id === polygonId || (movingGroup && p.groupId === movingGroup)) {
                 return translatePolygon(p, dx, dy);
             }
+            // Also move other selected polygons if they are not part of the group (Multi-move)
+            if (state.selectedPolygonIds.includes(p.id) && !movingGroup) {
+                 return translatePolygon(p, dx, dy);
+            }
             return p;
         });
 
@@ -1085,7 +1206,7 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
 
             return solvedPoly;
         });
-        return { ...stateWithHistory, polygons: newPolygons, solverMsg: msg };
+        return { ...stateWithHistory, polygons: newPolygons, solverMsg: msg, contextMenu: null };
     }
 
     case 'PAN_ZOOM':
@@ -1098,23 +1219,208 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
         };
 
     case 'DELETE_POLYGON': {
-        const isSelected = state.selectedPolygonId === action.payload;
-        // If deleting a polygon, update groups of others if needed (if it was a bridge)
+        const isSelected = state.selectedPolygonIds.includes(action.payload);
         const polyToDelete = state.polygons.find(p => p.id === action.payload);
         let updatedPolygons = state.polygons.filter(p => p.id !== action.payload);
         
         if (polyToDelete?.groupId) {
              updatedPolygons = recalculateGroups(updatedPolygons);
         }
+        
+        const newSelected = state.selectedPolygonIds.filter(id => id !== action.payload);
 
         return {
             ...withHistory(state),
             polygons: updatedPolygons,
-            selectedPolygonId: isSelected ? null : state.selectedPolygonId, 
+            selectedPolygonIds: newSelected, 
             selectedEdgeIds: isSelected ? [] : state.selectedEdgeIds,
-            solverMsg: null
+            solverMsg: null,
+            contextMenu: null
         };
     }
+
+    // --- NEW ACTIONS ---
+
+    case 'DUPLICATE_POLYGON': {
+        let polyId: string | undefined = action.payload;
+        // Fallback to selected if no specific ID provided
+        if (!polyId && state.selectedPolygonIds.length > 0) {
+            polyId = state.selectedPolygonIds[0];
+        }
+        
+        if (!polyId) return state;
+
+        const poly = state.polygons.find(p => p.id === polyId);
+        if (!poly) return state;
+
+        const newPoly = duplicatePolygon(poly);
+        return {
+            ...withHistory(state),
+            polygons: [...state.polygons, newPoly],
+            selectedPolygonIds: [newPoly.id],
+            selectedEdgeIds: [],
+            selectedVertexIds: [],
+            solverMsg: { type: 'success', text: 'Polygon duplicated.' },
+            contextMenu: null
+        };
+    }
+
+    case 'MIRROR_POLYGON': {
+        if (state.selectedPolygonIds.length === 0) return state;
+        const polyId = state.selectedPolygonIds[0];
+        const axis = action.payload.axis;
+        const mainPoly = state.polygons.find(p => p.id === polyId);
+        if (!mainPoly) return state;
+
+        const pivot = mainPoly.centroid;
+        const group = mainPoly.groupId;
+
+        const newPolygons = state.polygons.map(p => {
+            if (p.id === mainPoly.id || (group && p.groupId === group)) {
+                return mirrorPolygon(p, axis, pivot);
+            }
+            return p;
+        });
+
+        return {
+            ...withHistory(state),
+            polygons: newPolygons,
+            solverMsg: { type: 'success', text: `Mirrored ${axis === 'X' ? 'Horizontally' : 'Vertically'}` }
+        };
+    }
+
+    case 'START_ALIGN_MODE': {
+        if (state.selectedPolygonIds.length !== 1) return state;
+        const polyId = state.selectedPolygonIds[0];
+        const poly = state.polygons.find(p => p.id === polyId);
+        if (!poly || !poly.isLocked) {
+             return { ...state, solverMsg: { type: 'error', text: 'Polygon must be solved (locked) to align.' } };
+        }
+        return {
+            ...state,
+            alignState: {
+                step: 'SELECT_SOURCE',
+                sourcePolyId: poly.id,
+                offset: 0,
+                dist: 0
+            },
+            solverMsg: { type: 'success', text: 'Select an edge on the active polygon to align with.' }
+        };
+    }
+
+    case 'SELECT_ALIGN_EDGE': {
+        const edgeId = action.payload;
+        if (!state.alignState) return state;
+
+        if (state.alignState.step === 'SELECT_SOURCE') {
+            // Verify edge belongs to source poly
+            const poly = state.polygons.find(p => p.id === state.alignState?.sourcePolyId);
+            if (!poly?.edges.some(e => e.id === edgeId)) return state;
+
+            return {
+                ...state,
+                alignState: {
+                    ...state.alignState,
+                    step: 'SELECT_TARGET',
+                    sourceEdgeId: edgeId
+                },
+                selectedEdgeIds: [edgeId], // Highlight it
+                solverMsg: { type: 'success', text: 'Now select a target edge on ANY other polygon.' }
+            };
+        }
+
+        if (state.alignState.step === 'SELECT_TARGET') {
+            // Find target poly
+            const targetPoly = state.polygons.find(p => p.edges.some(e => e.id === edgeId));
+            if (!targetPoly) return state;
+            if (targetPoly.id === state.alignState.sourcePolyId) {
+                 return { ...state, solverMsg: { type: 'error', text: 'Cannot align to itself.' } };
+            }
+
+            return {
+                ...state,
+                alignState: {
+                    ...state.alignState,
+                    step: 'ADJUST',
+                    targetPolyId: targetPoly.id,
+                    targetEdgeId: edgeId
+                },
+                selectedEdgeIds: [...state.selectedEdgeIds, edgeId], // Highlight both
+                solverMsg: { type: 'success', text: 'Adjust alignment parameters.' }
+            };
+        }
+
+        return state;
+    }
+
+    case 'UPDATE_ALIGN_PARAMS': {
+        if (!state.alignState) return state;
+        return {
+            ...state,
+            alignState: {
+                ...state.alignState,
+                offset: action.payload.offset !== undefined ? action.payload.offset : state.alignState.offset,
+                dist: action.payload.dist !== undefined ? action.payload.dist : state.alignState.dist,
+            }
+        };
+    }
+
+    case 'CONFIRM_ALIGNMENT': {
+        if (!state.alignState || !state.alignState.sourcePolyId || !state.alignState.sourceEdgeId || !state.alignState.targetPolyId || !state.alignState.targetEdgeId) return state;
+
+        const { sourcePolyId, sourceEdgeId, targetPolyId, targetEdgeId, offset, dist } = state.alignState;
+        
+        const sPoly = state.polygons.find(p => p.id === sourcePolyId);
+        const tPoly = state.polygons.find(p => p.id === targetPolyId);
+        if (!sPoly || !tPoly) return { ...state, alignState: null };
+
+        // Calculate Transform
+        const transform = calculateAlignmentTransform(sPoly, sourceEdgeId, tPoly, targetEdgeId, offset, dist);
+
+        // Apply Rigid Body Transform to Source Group
+        const movingGroup = sPoly.groupId;
+        const pivot = sPoly.centroid; // Pivot for rotation is the Source Poly centroid
+
+        const newPolygons = state.polygons.map(p => {
+             if (p.id === sPoly.id || (movingGroup && p.groupId === movingGroup)) {
+                 // 1. Rotate around source centroid
+                 const rotated = rotatePolygon(p, pivot, transform.rotation);
+                 // 2. Translate
+                 const translated = translatePolygon(rotated, transform.dx, transform.dy);
+                 return translated;
+             }
+             return p;
+        });
+
+        return {
+            ...withHistory(state),
+            polygons: newPolygons,
+            alignState: null,
+            selectedEdgeIds: [],
+            solverMsg: { type: 'success', text: 'Alignment applied.' }
+        };
+    }
+
+    case 'CANCEL_ALIGNMENT':
+        return {
+            ...state,
+            alignState: null,
+            selectedEdgeIds: [],
+            solverMsg: null
+        };
+    
+    // --- CONTEXT MENU ---
+    case 'OPEN_CONTEXT_MENU':
+        return {
+            ...state,
+            contextMenu: action.payload
+        };
+        
+    case 'CLOSE_CONTEXT_MENU':
+        return {
+            ...state,
+            contextMenu: null
+        };
         
     case 'DISMISS_MESSAGE':
         return { ...state, solverMsg: null };

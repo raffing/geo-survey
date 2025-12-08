@@ -1,9 +1,8 @@
 
-
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useSurvey } from '../context/SurveyContext';
 import { generateRegularPolygon, checkConnectionStatus, generateDXF } from '../utils/geometry';
-import { Plus, Ruler, RefreshCw, Trash2, Focus, Minus, Link2, Unlink, AlertTriangle, CheckCircle, X, Layers, Check, Undo2, Redo2, ArrowRightLeft, Square, Ban, PenTool, StopCircle, Split, MoveHorizontal, FileJson, FileType, Upload, FolderOpen, Sun, Moon, HelpCircle, Pencil, ChevronDown, ChevronRight, Lock, Unlock, ArrowRight } from 'lucide-react';
+import { Plus, Ruler, RefreshCw, Trash2, Focus, Minus, Link2, Unlink, AlertTriangle, CheckCircle, X, Layers, Check, Undo2, Redo2, ArrowRightLeft, Square, Ban, PenTool, StopCircle, Split, MoveHorizontal, FileJson, FileType, Upload, FolderOpen, Sun, Moon, HelpCircle, Pencil, ChevronDown, ChevronRight, Lock, Unlock, ArrowRight, Copy, FlipHorizontal, FlipVertical, AlignStartVertical, Settings2, MoreHorizontal } from 'lucide-react';
 import { EdgeType, Polygon } from '../types';
 
 export const Controls: React.FC = () => {
@@ -27,12 +26,34 @@ export const Controls: React.FC = () => {
   const layerMenuRef = useRef<HTMLDivElement>(null);
   const exportMenuRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const contextMenuRef = useRef<HTMLDivElement>(null);
   
-  const selectedPoly = state.polygons.find(p => p.id === state.selectedPolygonId);
-  const selectedEdges = selectedPoly?.edges.filter(e => state.selectedEdgeIds.includes(e.id)) || [];
-  const selectedEdge = selectedEdges.length === 1 ? selectedEdges[0] : null; 
+  // Get selected polygon(s)
+  const selectedPolyId = state.selectedPolygonIds.length === 1 ? state.selectedPolygonIds[0] : null;
+  const selectedPoly = selectedPolyId ? state.polygons.find(p => p.id === selectedPolyId) : null;
+  
+  const multiSelectionCount = state.selectedPolygonIds.length;
+  
+  // Find edge details (only if 1 edge selected)
+  const selectedEdgePoly = state.polygons.find(p => p.edges.some(e => state.selectedEdgeIds.includes(e.id)));
+  const selectedEdges = selectedEdgePoly?.edges.filter(e => state.selectedEdgeIds.includes(e.id)) || [];
+  const selectedEdge = state.selectedEdgeIds.length === 1 && selectedEdges.length === 1 ? selectedEdges[0] : null; 
   
   const selectedVerticesCount = state.selectedVertexIds.length;
+
+  // Check if we can join selected edges (Multi-select Join)
+  const canJoinMulti = useMemo(() => {
+      if (state.selectedEdgeIds.length !== 2) return false;
+      const poly1 = state.polygons.find(p => p.edges.some(e => e.id === state.selectedEdgeIds[0]));
+      const poly2 = state.polygons.find(p => p.edges.some(e => e.id === state.selectedEdgeIds[1]));
+      
+      if (!poly1 || !poly2 || poly1.id === poly2.id) return false;
+      if (!poly1.isLocked || !poly2.isLocked) return false;
+      
+      // Check if already connected
+      // ... (can add refined check here, but action will double check)
+      return true;
+  }, [state.selectedEdgeIds, state.polygons]);
 
   // Grouping Logic for List View
   const polygonGroups = useMemo(() => {
@@ -94,6 +115,8 @@ export const Controls: React.FC = () => {
           if (e.key === 'Escape') {
               if (state.isDrawingMode) dispatch({ type: 'CANCEL_DRAWING', payload: undefined });
               if (state.isJoinMode) dispatch({ type: 'CANCEL_JOIN_CONFLICT', payload: undefined });
+              if (state.alignState) dispatch({ type: 'CANCEL_ALIGNMENT', payload: undefined });
+              if (state.contextMenu) dispatch({ type: 'CLOSE_CONTEXT_MENU', payload: undefined });
               if (showHelp) setShowHelp(false);
               setShowAddMenu(false);
               setShowLayerMenu(false);
@@ -101,8 +124,8 @@ export const Controls: React.FC = () => {
               setEditingId(null);
           }
           if (e.key === 'Delete' || e.key === 'Backspace') {
-              if (selectedPoly && !selectedEdge && state.selectedVertexIds.length === 0 && !editingId) {
-                  dispatch({ type: 'DELETE_POLYGON', payload: selectedPoly.id });
+              if (state.selectedPolygonIds.length > 0 && state.selectedEdgeIds.length === 0 && state.selectedVertexIds.length === 0 && !editingId) {
+                  state.selectedPolygonIds.forEach(id => dispatch({ type: 'DELETE_POLYGON', payload: id }));
               }
               if (selectedEdge && selectedEdge.type === EdgeType.DIAGONAL) {
                   dispatch({ type: 'DELETE_EDGE', payload: selectedEdge.id });
@@ -111,7 +134,7 @@ export const Controls: React.FC = () => {
       };
       window.addEventListener('keydown', handleKeyDown);
       return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedPoly, selectedEdge, state.selectedVertexIds, state.isDrawingMode, state.isJoinMode, showHelp, editingId]);
+  }, [selectedPoly, selectedEdge, state.selectedPolygonIds, state.selectedEdgeIds, state.selectedVertexIds, state.isDrawingMode, state.isJoinMode, state.alignState, state.contextMenu, showHelp, editingId]);
 
   // Constraint Status calculation
   const constraintStats = React.useMemo(() => {
@@ -147,14 +170,18 @@ export const Controls: React.FC = () => {
       if (exportMenuRef.current && !exportMenuRef.current.contains(event.target as Node)) {
         setShowExportMenu(false);
       }
+      // Context menu has its own backdrop logic, but global listener is safe backup
+      if (state.contextMenu && contextMenuRef.current && !contextMenuRef.current.contains(event.target as Node)) {
+          dispatch({ type: 'CLOSE_CONTEXT_MENU', payload: undefined });
+      }
     };
-    if (showAddMenu || showLayerMenu || showExportMenu) {
+    if (showAddMenu || showLayerMenu || showExportMenu || state.contextMenu) {
         document.addEventListener('mousedown', handleClickOutside);
     }
     return () => {
         document.removeEventListener('mousedown', handleClickOutside);
     };
-  }, [showAddMenu, showLayerMenu, showExportMenu]);
+  }, [showAddMenu, showLayerMenu, showExportMenu, state.contextMenu]);
 
   useEffect(() => {
     if (showAddMenu) {
@@ -200,9 +227,9 @@ export const Controls: React.FC = () => {
 
   // Edge Editor Position Calculation (Flying)
   const edgeEditorPos = React.useMemo(() => {
-      if (!selectedEdge || !selectedPoly) return null;
-      const v1 = selectedPoly.vertices.find(v => v.id === selectedEdge.startVertexId);
-      const v2 = selectedPoly.vertices.find(v => v.id === selectedEdge.endVertexId);
+      if (!selectedEdge || !selectedEdgePoly) return null;
+      const v1 = selectedEdgePoly.vertices.find(v => v.id === selectedEdge.startVertexId);
+      const v2 = selectedEdgePoly.vertices.find(v => v.id === selectedEdge.endVertexId);
       if (!v1 || !v2) return null;
 
       // Calculate midpoint in world space
@@ -234,7 +261,7 @@ export const Controls: React.FC = () => {
       safeY = Math.max(80, safeY); 
 
       return { x: safeX, y: safeY };
-  }, [selectedEdge, selectedPoly, state.zoomLevel, state.panOffset, state.rotation]);
+  }, [selectedEdge, selectedEdgePoly, state.zoomLevel, state.panOffset, state.rotation]);
 
   const handleAddPolygon = () => {
     const center = { 
@@ -245,6 +272,38 @@ export const Controls: React.FC = () => {
     const newPoly = generateRegularPolygon(center, numSides, `poly-${Date.now()}`, finalName);
     dispatch({ type: 'ADD_POLYGON', payload: newPoly });
     setShowAddMenu(false);
+  };
+  
+  // Create Polygon at context click position
+  const handleAddPolygonAtContext = () => {
+      if (!state.contextMenu) return;
+      const { x, y } = state.contextMenu;
+      const { panOffset, zoomLevel, rotation } = state;
+
+      // Inverse Transform
+      const dx = x - panOffset.x;
+      const dy = y - panOffset.y;
+      
+      // Rotate inverse (-rotation)
+      const cos = Math.cos(-rotation);
+      const sin = Math.sin(-rotation);
+      const rx = dx * cos - dy * sin;
+      const ry = dx * sin + dy * cos;
+      
+      // Scale inverse
+      const worldX = rx / zoomLevel;
+      const worldY = ry / zoomLevel;
+
+      const finalName = `Polygon ${state.polygons.length + 1}`;
+      const newPoly = generateRegularPolygon({ x: worldX, y: worldY }, 4, `poly-${Date.now()}`, finalName);
+      
+      dispatch({ type: 'ADD_POLYGON', payload: newPoly });
+      dispatch({ type: 'CLOSE_CONTEXT_MENU', payload: undefined });
+  };
+  
+  const handleContextImport = () => {
+      fileInputRef.current?.click();
+      dispatch({ type: 'CLOSE_CONTEXT_MENU', payload: undefined });
   };
 
   const handleStartDrawing = () => {
@@ -357,17 +416,18 @@ export const Controls: React.FC = () => {
   const renderPolygonListItem = (p: Polygon) => (
       <div 
         key={p.id}
-        onClick={() => {
-            dispatch({ type: 'SELECT_POLYGON', payload: { id: p.id, shouldFocus: true } });
+        onClick={(e) => {
+            const isCtrl = e.ctrlKey || e.metaKey;
+            dispatch({ type: 'SELECT_POLYGON', payload: { id: p.id, shouldFocus: true, multi: isCtrl } });
         }}
         className={`flex items-center justify-between p-2 rounded cursor-pointer ${
-            p.id === state.selectedPolygonId 
+            state.selectedPolygonIds.includes(p.id)
             ? 'bg-brand-100 dark:bg-brand-900/50 border border-brand-500/50' 
             : 'hover:bg-slate-100 dark:hover:bg-slate-700 border border-transparent'
         }`}
       >
         <div className="flex items-center gap-2 flex-1 min-w-0">
-            {p.id === state.selectedPolygonId && <Check size={14} className="text-brand-600 dark:text-brand-400 shrink-0" />}
+            {state.selectedPolygonIds.includes(p.id) && <Check size={14} className="text-brand-600 dark:text-brand-400 shrink-0" />}
             {p.isLocked ? <Lock size={12} className="text-amber-500/70 shrink-0" /> : <Unlock size={12} className="text-slate-300 shrink-0"/>}
             
             {editingId === p.id ? (
@@ -390,7 +450,7 @@ export const Controls: React.FC = () => {
                     className="w-full bg-white dark:bg-slate-900 border border-brand-500 rounded px-1 py-0.5 text-xs text-slate-900 dark:text-slate-100"
                 />
             ) : (
-                <span className={`text-sm font-medium truncate ${p.id === state.selectedPolygonId ? 'text-brand-700 dark:text-brand-200' : ''}`}>
+                <span className={`text-sm font-medium truncate ${state.selectedPolygonIds.includes(p.id) ? 'text-brand-700 dark:text-brand-200' : ''}`}>
                     {p.name}
                 </span>
             )}
@@ -435,6 +495,15 @@ export const Controls: React.FC = () => {
   return (
     <div className="absolute inset-0 pointer-events-none flex flex-col justify-between z-10">
         
+        {/* Hidden File Input for context menu */}
+        <input 
+             ref={fileInputRef}
+             type="file" 
+             accept=".json"
+             className="hidden pointer-events-auto" 
+             onChange={handleImportJSON}
+        />
+
         {/* Top Header Section */}
         <div className="w-full flex flex-col items-center sm:block pt-2 px-2 sm:pt-4 sm:px-4 relative pointer-events-none">
             
@@ -521,13 +590,13 @@ export const Controls: React.FC = () => {
                                                     setShowLayerMenu(false);
                                                 }}
                                                 className={`flex items-center gap-2 p-2 rounded cursor-pointer ${
-                                                    state.selectedPolygonId === null
+                                                    state.selectedPolygonIds.length === 0
                                                     ? 'bg-brand-100 dark:bg-brand-900/50 border border-brand-500/50' 
                                                     : 'hover:bg-slate-100 dark:hover:bg-slate-700 border border-transparent'
                                                 }`}
                                             >
-                                                {state.selectedPolygonId === null ? <Check size={14} className="text-brand-600 dark:text-brand-400" /> : <div className="w-[14px]" />}
-                                                <span className={`text-sm font-medium ${state.selectedPolygonId === null ? 'text-brand-700 dark:text-brand-200' : ''}`}>
+                                                {state.selectedPolygonIds.length === 0 ? <Check size={14} className="text-brand-600 dark:text-brand-400" /> : <div className="w-[14px]" />}
+                                                <span className={`text-sm font-medium ${state.selectedPolygonIds.length === 0 ? 'text-brand-700 dark:text-brand-200' : ''}`}>
                                                     Show All (Overview)
                                                 </span>
                                             </div>
@@ -587,13 +656,10 @@ export const Controls: React.FC = () => {
                                          <div className="h-px bg-slate-200 dark:bg-slate-700 my-1"></div>
                                          <label className="w-full flex items-center gap-2 p-2 rounded hover:bg-slate-100 dark:hover:bg-slate-700 text-sm cursor-pointer">
                                              <Upload size={16}/> Import JSON
-                                             <input 
-                                                 ref={fileInputRef}
-                                                 type="file" 
-                                                 accept=".json"
-                                                 className="hidden" 
-                                                 onChange={handleImportJSON}
-                                             />
+                                             {/* Duplicate input here removed, relying on top level one if possible or keeping it here for menu click */}
+                                             {/* Actually, file input is handled by global ref now for context menu reuse, but let's keep this one for direct menu usage or wire it to same ref logic? 
+                                                 Let's just use the global hidden input for consistency if needed, but here we can keep inline input for simplicity as it works. 
+                                                 Or better, reuse the global hidden input. */}
                                          </label>
                                          <div className="h-px bg-slate-200 dark:bg-slate-700 my-1"></div>
                                          <button onClick={handleExportJSON} className="w-full flex items-center gap-2 p-2 rounded hover:bg-slate-100 dark:hover:bg-slate-700 text-sm">
@@ -691,7 +757,15 @@ export const Controls: React.FC = () => {
                             state.isJoinMode ? (
                                 <span className="text-yellow-600 dark:text-yellow-400 font-bold animate-pulse">SELECT TARGET EDGE</span>
                             ) : (
-                                selectedPoly ? selectedPoly.name : `${state.polygons.length} Shape${state.polygons.length !== 1 ? 's' : ''}`
+                                state.alignState ? (
+                                    <span className="text-purple-600 dark:text-purple-400 font-bold animate-pulse">ALIGNING...</span>
+                                ) : (
+                                    multiSelectionCount > 1 ? (
+                                        <span className="text-brand-600 dark:text-brand-400 font-bold">{multiSelectionCount} Selected</span>
+                                    ) : (
+                                        selectedPoly ? selectedPoly.name : `${state.polygons.length} Shape${state.polygons.length !== 1 ? 's' : ''}`
+                                    )
+                                )
                             )
                         )}
                     </div>
@@ -709,6 +783,63 @@ export const Controls: React.FC = () => {
                 </div>
             )}
         </div>
+
+        {/* ALIGNMENT WIZARD MODAL (Replaces Bottom Panel when active) */}
+        {state.alignState && (
+            <div className="pointer-events-auto absolute bottom-4 left-4 right-4 z-50 flex flex-col items-center">
+                 <div className="bg-white/95 dark:bg-slate-800/95 backdrop-blur-md rounded-2xl shadow-2xl border border-purple-500/30 p-4 max-w-sm w-full animate-in slide-in-from-bottom-10">
+                    <div className="flex justify-between items-center mb-3">
+                         <h3 className="text-sm font-bold text-purple-600 dark:text-purple-400 uppercase tracking-wider flex items-center gap-2">
+                             <Settings2 size={16}/> Align Polygon
+                         </h3>
+                         <button onClick={() => dispatch({ type: 'CANCEL_ALIGNMENT', payload: undefined })} className="p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded text-slate-500">
+                             <X size={16} />
+                         </button>
+                    </div>
+
+                    {state.alignState.step === 'SELECT_SOURCE' && (
+                        <p className="text-sm text-slate-600 dark:text-slate-300 mb-2">Select an edge on the <strong>active polygon</strong> to align.</p>
+                    )}
+                    {state.alignState.step === 'SELECT_TARGET' && (
+                        <p className="text-sm text-slate-600 dark:text-slate-300 mb-2">Select an edge on a <strong>target polygon</strong> to snap to.</p>
+                    )}
+                    {state.alignState.step === 'ADJUST' && (
+                        <div className="space-y-4">
+                             <div>
+                                <div className="flex justify-between text-xs font-bold text-slate-500 uppercase mb-1">
+                                    <span>Offset (Slide)</span>
+                                    <span>{state.alignState.offset.toFixed(2)} m</span>
+                                </div>
+                                <input 
+                                    type="range" min="-5" max="5" step="0.05"
+                                    value={state.alignState.offset}
+                                    onChange={(e) => dispatch({ type: 'UPDATE_ALIGN_PARAMS', payload: { offset: parseFloat(e.target.value) } })}
+                                    className="w-full h-1 bg-slate-200 dark:bg-slate-600 rounded-lg appearance-none cursor-pointer accent-purple-500"
+                                />
+                             </div>
+                             <div>
+                                <div className="flex justify-between text-xs font-bold text-slate-500 uppercase mb-1">
+                                    <span>Gap (Distance)</span>
+                                    <span>{state.alignState.dist.toFixed(2)} m</span>
+                                </div>
+                                <input 
+                                    type="range" min="0" max="2" step="0.01"
+                                    value={state.alignState.dist}
+                                    onChange={(e) => dispatch({ type: 'UPDATE_ALIGN_PARAMS', payload: { dist: parseFloat(e.target.value) } })}
+                                    className="w-full h-1 bg-slate-200 dark:bg-slate-600 rounded-lg appearance-none cursor-pointer accent-purple-500"
+                                />
+                             </div>
+                             <button 
+                                onClick={() => dispatch({ type: 'CONFIRM_ALIGNMENT', payload: undefined })}
+                                className="w-full py-3 bg-purple-600 hover:bg-purple-500 text-white font-bold rounded-xl shadow-lg mt-2"
+                             >
+                                 APPLY
+                             </button>
+                        </div>
+                    )}
+                 </div>
+            </div>
+        )}
 
         {/* JOIN CONFLICT MODAL */}
         {state.joinConflict && (
@@ -747,9 +878,135 @@ export const Controls: React.FC = () => {
                 </div>
             </div>
         )}
+        
+        {/* CUSTOM CONTEXT MENU */}
+        {state.contextMenu && (
+            <div className="fixed inset-0 z-[100] pointer-events-auto">
+                 {/* Backdrop to close on click outside */}
+                 <div className="absolute inset-0" onClick={() => dispatch({ type: 'CLOSE_CONTEXT_MENU', payload: undefined })}></div>
+                 
+                 <div 
+                    ref={contextMenuRef}
+                    className="absolute bg-white dark:bg-slate-800 rounded-lg shadow-xl border border-slate-200 dark:border-slate-600 py-1 min-w-[180px] animate-in fade-in zoom-in-95 duration-100"
+                    style={{ left: state.contextMenu.x, top: state.contextMenu.y }}
+                 >
+                     {state.contextMenu.type === 'CANVAS' && (
+                         <>
+                            <div className="px-3 py-1.5 text-xs font-bold text-slate-400 uppercase tracking-wider">Canvas Actions</div>
+                            <button 
+                                onClick={handleAddPolygonAtContext}
+                                className="w-full text-left px-3 py-2 text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 flex items-center gap-2"
+                            >
+                                <Plus size={16} className="text-brand-500" /> Add Polygon Here
+                            </button>
+                            <button 
+                                onClick={handleContextImport}
+                                className="w-full text-left px-3 py-2 text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 flex items-center gap-2"
+                            >
+                                <FileJson size={16} className="text-slate-400" /> Import Data
+                            </button>
+                         </>
+                     )}
+
+                     {state.contextMenu.type === 'POLYGON' && state.contextMenu.targetId && (
+                         <>
+                            <div className="px-3 py-1.5 text-xs font-bold text-slate-400 uppercase tracking-wider">Polygon Actions</div>
+                            <button 
+                                onClick={() => {
+                                    dispatch({ type: 'DUPLICATE_POLYGON', payload: state.contextMenu?.targetId });
+                                    dispatch({ type: 'CLOSE_CONTEXT_MENU', payload: undefined });
+                                }}
+                                className="w-full text-left px-3 py-2 text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 flex items-center gap-2"
+                            >
+                                <Copy size={16} className="text-slate-400" /> Duplicate
+                            </button>
+                             <button 
+                                onClick={() => {
+                                    if (state.contextMenu?.targetId) {
+                                        dispatch({ type: 'RECONSTRUCT_GEOMETRY', payload: state.contextMenu.targetId });
+                                    }
+                                    dispatch({ type: 'CLOSE_CONTEXT_MENU', payload: undefined });
+                                }}
+                                className="w-full text-left px-3 py-2 text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 flex items-center gap-2"
+                            >
+                                <RefreshCw size={16} className="text-brand-500" /> Solve Geometry
+                            </button>
+                             <div className="h-px bg-slate-200 dark:bg-slate-700 my-1"></div>
+                            <button 
+                                onClick={() => {
+                                    if (state.contextMenu?.targetId) {
+                                        dispatch({ type: 'DELETE_POLYGON', payload: state.contextMenu.targetId });
+                                    }
+                                    dispatch({ type: 'CLOSE_CONTEXT_MENU', payload: undefined });
+                                }}
+                                className="w-full text-left px-3 py-2 text-sm text-red-500 hover:bg-red-50 dark:hover:bg-red-900/30 flex items-center gap-2"
+                            >
+                                <Trash2 size={16} /> Delete
+                            </button>
+                         </>
+                     )}
+
+                     {state.contextMenu.type === 'EDGE' && state.contextMenu.targetId && (
+                         <>
+                            <div className="px-3 py-1.5 text-xs font-bold text-slate-400 uppercase tracking-wider">Edge Actions</div>
+                            <button 
+                                onClick={() => {
+                                    if (state.contextMenu?.targetId) {
+                                        dispatch({ type: 'SPLIT_EDGE', payload: state.contextMenu.targetId });
+                                    }
+                                    dispatch({ type: 'CLOSE_CONTEXT_MENU', payload: undefined });
+                                }}
+                                className="w-full text-left px-3 py-2 text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 flex items-center gap-2"
+                            >
+                                <Split size={16} className="text-slate-400" /> Split Edge
+                            </button>
+                             <button 
+                                onClick={() => {
+                                    if (state.contextMenu?.targetId) {
+                                        dispatch({ type: 'SELECT_EDGE', payload: { edgeId: state.contextMenu.targetId, multi: false } });
+                                    }
+                                    dispatch({ type: 'CLOSE_CONTEXT_MENU', payload: undefined });
+                                }}
+                                className="w-full text-left px-3 py-2 text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 flex items-center gap-2"
+                            >
+                                <Ruler size={16} className="text-brand-500" /> Set Length / Edit
+                            </button>
+                         </>
+                     )}
+
+                     {state.contextMenu.type === 'VERTEX' && state.contextMenu.targetId && (
+                         <>
+                            <div className="px-3 py-1.5 text-xs font-bold text-slate-400 uppercase tracking-wider">Vertex Actions</div>
+                            <button 
+                                onClick={() => {
+                                    if (state.contextMenu?.targetId) {
+                                        dispatch({ type: 'SET_VERTEX_ANGLE', payload: { vertexId: state.contextMenu.targetId, angle: 90 } });
+                                    }
+                                    dispatch({ type: 'CLOSE_CONTEXT_MENU', payload: undefined });
+                                }}
+                                className="w-full text-left px-3 py-2 text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 flex items-center gap-2"
+                            >
+                                <Square size={16} className="text-amber-500" /> Fix 90°
+                            </button>
+                            <button 
+                                onClick={() => {
+                                    if (state.contextMenu?.targetId) {
+                                        dispatch({ type: 'SET_VERTEX_ANGLE', payload: { vertexId: state.contextMenu.targetId, angle: undefined } });
+                                    }
+                                    dispatch({ type: 'CLOSE_CONTEXT_MENU', payload: undefined });
+                                }}
+                                className="w-full text-left px-3 py-2 text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 flex items-center gap-2"
+                            >
+                                <Ban size={16} className="text-slate-400" /> Free Angle
+                            </button>
+                         </>
+                     )}
+                 </div>
+            </div>
+        )}
 
         {/* Flying Edge Editor */}
-        {!state.isJoinMode && !state.isDrawingMode && selectedEdge && edgeEditorPos && (
+        {!state.isJoinMode && !state.alignState && !state.isDrawingMode && selectedEdge && edgeEditorPos && (
              <div 
                 className="pointer-events-auto absolute z-40 bg-white/95 dark:bg-slate-800/95 backdrop-blur-md rounded-xl p-3 shadow-2xl border border-brand-500/50 animate-in zoom-in-95 flex flex-col gap-2 w-[260px] text-slate-800 dark:text-slate-100"
                 style={{ top: edgeEditorPos.y, left: edgeEditorPos.x }}
@@ -764,8 +1021,8 @@ export const Controls: React.FC = () => {
                                     <Split size={14} />
                                 </button>
                             )}
-                            {/* JOIN BUTTON: ONLY VISIBLE IF NOT LINKED AND POLYGON IS LOCKED */}
-                            {selectedEdge.type === EdgeType.PERIMETER && !selectedEdge.linkedEdgeId && state.polygons.length > 1 && selectedPoly?.isLocked && (
+                            {/* JOIN BUTTON (Classic): ONLY VISIBLE IF NOT LINKED AND POLYGON IS LOCKED AND NO MULTI-SELECT */}
+                            {selectedEdge.type === EdgeType.PERIMETER && !selectedEdge.linkedEdgeId && state.polygons.length > 1 && selectedEdgePoly?.isLocked && !canJoinMulti && (
                                 <button 
                                     onClick={() => dispatch({ type: 'START_JOIN_MODE', payload: selectedEdge.id })} 
                                     className="text-yellow-600 dark:text-yellow-400 hover:bg-yellow-50 dark:hover:bg-yellow-900/30 p-1.5 rounded" 
@@ -920,6 +1177,7 @@ export const Controls: React.FC = () => {
                                 <div className="flex justify-between p-2 bg-slate-50 dark:bg-slate-700/50 rounded"><span>Solve Geometry</span> <kbd className="font-mono bg-slate-200 dark:bg-slate-600 px-1 rounded">S</kbd></div>
                                 <div className="flex justify-between p-2 bg-slate-50 dark:bg-slate-700/50 rounded"><span>Toggle Theme</span> <kbd className="font-mono bg-slate-200 dark:bg-slate-600 px-1 rounded">T</kbd></div>
                                 <div className="flex justify-between p-2 bg-slate-50 dark:bg-slate-700/50 rounded"><span>Delete Selected</span> <kbd className="font-mono bg-slate-200 dark:bg-slate-600 px-1 rounded">Del</kbd></div>
+                                <div className="flex justify-between p-2 bg-slate-50 dark:bg-slate-700/50 rounded"><span>Multi-Select</span> <kbd className="font-mono bg-slate-200 dark:bg-slate-600 px-1 rounded">Ctrl+Click</kbd></div>
                             </div>
                         </section>
                         
@@ -931,6 +1189,7 @@ export const Controls: React.FC = () => {
                                 <li><strong>Triangulate:</strong> Add diagonal connections between vertices to rigidify the shape.</li>
                                 <li><strong>Solve:</strong> Press "Solve" to reconstruct the geometry. Only resolved/locked shapes can be joined.</li>
                                 <li><strong>Join:</strong> Select an edge on a LOCKED shape to snap to another LOCKED shape. They become a rigid group. Only one join allowed between two shapes.</li>
+                                <li><strong>Multi-Select:</strong> Ctrl+Click or Long Press to select multiple shapes.</li>
                             </ul>
                         </section>
                     </div>
@@ -955,48 +1214,108 @@ export const Controls: React.FC = () => {
                 </div>
             )}
 
-            {!state.isJoinMode && !state.isDrawingMode && selectedVerticesCount === 2 && canConnect && (
-                 <div className="flex justify-end animate-in slide-in-from-bottom-5">
-                    <button onClick={() => dispatch({ type: 'ADD_DIAGONAL', payload: undefined })} className="bg-brand-600 hover:bg-brand-500 text-white px-6 py-3 rounded-xl font-bold shadow-lg flex items-center gap-2">
-                        <Link2 size={20} /> CONNECT
-                    </button>
-                 </div>
-            )}
-            
-            {/* SOLVE BUTTON AREA - ALWAYS VISIBLE */}
-            {!state.isDrawingMode && !state.isJoinMode && (
-                <div className="flex gap-2 justify-end">
-                    {/* Constraints Badge (Only if selected) */}
-                    {selectedPoly && constraintStats && (
-                         <div className={`flex items-center gap-1 px-3 py-2 rounded-xl border text-xs font-bold uppercase shadow-sm ${
-                             constraintStats.current > constraintStats.needed 
-                             ? 'bg-blue-100 dark:bg-blue-900/50 border-blue-500 text-blue-800 dark:text-blue-200'
-                             : (constraintStats.current === constraintStats.needed 
-                                ? 'bg-green-100 dark:bg-green-900/50 border-green-500 text-green-800 dark:text-green-200' 
-                                : 'bg-amber-100 dark:bg-amber-900/50 border-amber-500 text-amber-800 dark:text-amber-200')
-                         }`}>
-                             <StopCircle size={14} />
-                             {constraintStats.current}/{constraintStats.needed}
+            {!state.isJoinMode && !state.isDrawingMode && !state.alignState && (
+                <>
+                    {/* POLYGON ACTION TOOLBAR (Shown if >= 1 poly selected) */}
+                    {state.selectedPolygonIds.length > 0 && (
+                        <div className="flex gap-2 justify-end animate-in slide-in-from-bottom-5 overflow-x-auto pb-1 no-scrollbar">
+                            <button 
+                                onClick={() => dispatch({ type: 'DUPLICATE_POLYGON', payload: undefined })} 
+                                className="bg-white dark:bg-slate-700 hover:bg-slate-100 dark:hover:bg-slate-600 p-3 rounded-xl shadow-md border border-slate-200 dark:border-slate-600 text-slate-700 dark:text-slate-200 min-w-[50px] flex flex-col items-center gap-1"
+                                title="Duplicate"
+                            >
+                                <Copy size={20} />
+                                <span className="text-[9px] font-bold uppercase">Clone</span>
+                            </button>
+                            <div className="w-px bg-slate-300 dark:bg-slate-600 mx-1"></div>
+                            <button 
+                                onClick={() => dispatch({ type: 'MIRROR_POLYGON', payload: { axis: 'X' } })} 
+                                className="bg-white dark:bg-slate-700 hover:bg-slate-100 dark:hover:bg-slate-600 p-3 rounded-xl shadow-md border border-slate-200 dark:border-slate-600 text-slate-700 dark:text-slate-200 min-w-[50px] flex flex-col items-center gap-1"
+                                title="Mirror Horizontal"
+                            >
+                                <FlipHorizontal size={20} />
+                                <span className="text-[9px] font-bold uppercase">Flip X</span>
+                            </button>
+                            <button 
+                                onClick={() => dispatch({ type: 'MIRROR_POLYGON', payload: { axis: 'Y' } })} 
+                                className="bg-white dark:bg-slate-700 hover:bg-slate-100 dark:hover:bg-slate-600 p-3 rounded-xl shadow-md border border-slate-200 dark:border-slate-600 text-slate-700 dark:text-slate-200 min-w-[50px] flex flex-col items-center gap-1"
+                                title="Mirror Vertical"
+                            >
+                                <FlipVertical size={20} />
+                                <span className="text-[9px] font-bold uppercase">Flip Y</span>
+                            </button>
+                            <div className="w-px bg-slate-300 dark:bg-slate-600 mx-1"></div>
+                             <button 
+                                onClick={() => dispatch({ type: 'START_ALIGN_MODE', payload: undefined })} 
+                                className={`p-3 rounded-xl shadow-md border flex flex-col items-center gap-1 min-w-[50px] ${selectedPoly && selectedPoly.isLocked && multiSelectionCount === 1
+                                    ? 'bg-purple-100 dark:bg-purple-900/40 border-purple-300 dark:border-purple-600 text-purple-700 dark:text-purple-200 hover:bg-purple-200 dark:hover:bg-purple-800/60' 
+                                    : 'bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-600 text-slate-400 cursor-not-allowed'}`}
+                                disabled={!selectedPoly || !selectedPoly.isLocked || multiSelectionCount !== 1}
+                                title="Align (Requires Single Solved Shape)"
+                            >
+                                <AlignStartVertical size={20} />
+                                <span className="text-[9px] font-bold uppercase">Align</span>
+                            </button>
+                        </div>
+                    )}
+                    
+                    {/* Connection Button */}
+                    {selectedVerticesCount === 2 && canConnect && (
+                         <div className="flex justify-end animate-in slide-in-from-bottom-5">
+                            <button onClick={() => dispatch({ type: 'ADD_DIAGONAL', payload: undefined })} className="bg-brand-600 hover:bg-brand-500 text-white px-6 py-3 rounded-xl font-bold shadow-lg flex items-center gap-2">
+                                <Link2 size={20} /> CONNECT
+                            </button>
                          </div>
                     )}
 
-                    <button 
-                        onClick={() => selectedPoly && dispatch({ type: 'RECONSTRUCT_GEOMETRY', payload: selectedPoly.id })}
-                        disabled={!selectedPoly}
-                        className={`px-6 py-4 rounded-xl font-bold shadow-lg flex items-center gap-2 flex-1 justify-center transition-transform ${
-                            selectedPoly 
-                            ? 'bg-green-600 hover:bg-green-500 text-white active:scale-95 cursor-pointer' 
-                            : 'bg-white dark:bg-slate-700 text-slate-400 dark:text-slate-500 cursor-not-allowed border border-slate-200 dark:border-slate-600'
-                        }`}
-                        title="Solve (S)"
-                    >
-                        <RefreshCw size={20} />
-                        SOLVE
-                    </button>
-                </div>
+                    {/* MULTI JOIN BUTTON */}
+                    {canJoinMulti && (
+                        <div className="flex justify-end animate-in slide-in-from-bottom-5">
+                            <button 
+                                onClick={() => dispatch({ type: 'JOIN_SELECTED_EDGES', payload: undefined })}
+                                className="bg-yellow-600 hover:bg-yellow-500 text-white px-6 py-3 rounded-xl font-bold shadow-lg flex items-center gap-2 border border-yellow-700"
+                            >
+                                <ArrowRightLeft size={20} /> JOIN SELECTED
+                            </button>
+                        </div>
+                    )}
+
+                    {/* SOLVE BUTTON AREA (Only if 1 poly selected) */}
+                    {multiSelectionCount <= 1 && (
+                        <div className="flex gap-2 justify-end">
+                            {/* Constraints Badge */}
+                            {selectedPoly && constraintStats && (
+                                <div className={`flex items-center gap-1 px-3 py-2 rounded-xl border text-xs font-bold uppercase shadow-sm ${
+                                    constraintStats.current > constraintStats.needed 
+                                    ? 'bg-blue-100 dark:bg-blue-900/50 border-blue-500 text-blue-800 dark:text-blue-200'
+                                    : (constraintStats.current === constraintStats.needed 
+                                        ? 'bg-green-100 dark:bg-green-900/50 border-green-500 text-green-800 dark:text-green-200' 
+                                        : 'bg-amber-100 dark:bg-amber-900/50 border-amber-500 text-amber-800 dark:text-amber-200')
+                                }`}>
+                                    <StopCircle size={14} />
+                                    {constraintStats.current}/{constraintStats.needed}
+                                </div>
+                            )}
+
+                            <button 
+                                onClick={() => selectedPoly && dispatch({ type: 'RECONSTRUCT_GEOMETRY', payload: selectedPoly.id })}
+                                disabled={!selectedPoly}
+                                className={`px-6 py-4 rounded-xl font-bold shadow-lg flex items-center gap-2 flex-1 justify-center transition-transform ${
+                                    selectedPoly 
+                                    ? 'bg-green-600 hover:bg-green-500 text-white active:scale-95 cursor-pointer' 
+                                    : 'bg-white dark:bg-slate-700 text-slate-400 dark:text-slate-500 cursor-not-allowed border border-slate-200 dark:border-slate-600'
+                                }`}
+                                title="Solve (S)"
+                            >
+                                <RefreshCw size={20} />
+                                SOLVE
+                            </button>
+                        </div>
+                    )}
+                </>
             )}
             
-            {!state.isDrawingMode && !selectedPoly && state.polygons.length === 0 && (
+            {!state.isDrawingMode && state.selectedPolygonIds.length === 0 && state.polygons.length === 0 && (
                 <div className="text-center p-4 bg-white/50 dark:bg-slate-800/50 rounded-xl text-slate-500 dark:text-slate-400 text-sm">
                     Tap "Add" to start a new survey sketch.
                 </div>

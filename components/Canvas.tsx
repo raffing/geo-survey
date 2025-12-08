@@ -1,5 +1,4 @@
 
-
 import React, { useRef, useState, useMemo } from 'react';
 import { useSurvey } from '../context/SurveyContext';
 import { EdgeType } from '../types';
@@ -33,6 +32,10 @@ export const Canvas: React.FC = () => {
   const hasMovedRef = useRef<boolean>(false);
   const hasSnapshotRef = useRef<boolean>(false);
 
+  // Long Press Refs
+  const longPressTimerRef = useRef<number | null>(null);
+  const longPressTriggeredRef = useRef<boolean>(false);
+
   // Gesture State
   const activePointers = useRef<Map<number, { x: number; y: number }>>(new Map());
   const pinchStartInfo = useRef<{ 
@@ -50,16 +53,20 @@ export const Canvas: React.FC = () => {
       }
       if (state.isJoinMode) return state.polygons;
 
-      if (state.selectedPolygonId && state.isFocused) {
-          // If focused, show the selected polygon AND its group members
-          const selected = state.polygons.find(p => p.id === state.selectedPolygonId);
-          if (selected?.groupId) {
-              return state.polygons.filter(p => p.id === state.selectedPolygonId || p.groupId === selected.groupId);
-          }
-          return state.polygons.filter(p => p.id === state.selectedPolygonId);
+      // When focused, show related group members
+      if (state.selectedPolygonIds.length > 0 && state.isFocused) {
+          const focusedIds = new Set(state.selectedPolygonIds);
+          // Add group members
+          state.polygons.forEach(p => {
+              if (state.selectedPolygonIds.includes(p.id) && p.groupId) {
+                  state.polygons.filter(peer => peer.groupId === p.groupId).forEach(peer => focusedIds.add(peer.id));
+              }
+          });
+          
+          return state.polygons.filter(p => focusedIds.has(p.id));
       }
       return state.polygons;
-  }, [state.polygons, state.selectedPolygonId, state.isJoinMode, state.isDrawingMode, state.isFocused]);
+  }, [state.polygons, state.selectedPolygonIds, state.isJoinMode, state.isDrawingMode, state.isFocused]);
 
   const rotationDeg = state.rotation * 180 / Math.PI;
   const gridColor = state.theme === 'dark' ? '#1e293b' : '#cbd5e1';
@@ -73,7 +80,53 @@ export const Canvas: React.FC = () => {
     return pt.matrixTransform(groupRef.current.getScreenCTM()?.inverse());
   };
 
+  const handleContextMenu = (e: React.MouseEvent, type: 'CANVAS' | 'POLYGON' | 'EDGE' | 'VERTEX', targetId?: string) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dispatch({ 
+          type: 'OPEN_CONTEXT_MENU', 
+          payload: { 
+              x: e.clientX, 
+              y: e.clientY, 
+              type, 
+              targetId 
+          } 
+      });
+  };
+
+  const startLongPress = (id: string, type: 'polygon' | 'edge') => {
+      longPressTriggeredRef.current = false;
+      if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+      
+      longPressTimerRef.current = window.setTimeout(() => {
+          longPressTriggeredRef.current = true;
+          if (type === 'polygon') {
+               dispatch({ type: 'SELECT_POLYGON', payload: { id, multi: true } });
+          } else if (type === 'edge') {
+               dispatch({ type: 'SELECT_EDGE', payload: { edgeId: id, multi: true } });
+          }
+          // Haptic feedback if available
+          if (navigator.vibrate) navigator.vibrate(50);
+      }, 500); // 500ms for long press
+  };
+
+  const cancelLongPress = () => {
+      if (longPressTimerRef.current) {
+          clearTimeout(longPressTimerRef.current);
+          longPressTimerRef.current = null;
+      }
+  };
+
   const handlePointerDown = (e: React.PointerEvent) => {
+    // If context menu is open, let native handling close it via backdrop in Controls, or simple click outside logic
+    if (state.contextMenu) {
+        dispatch({ type: 'CLOSE_CONTEXT_MENU', payload: undefined });
+    }
+
+    if (e.button === 2) {
+        return; 
+    }
+
     svgRef.current?.setPointerCapture(e.pointerId);
     activePointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
@@ -88,7 +141,7 @@ export const Canvas: React.FC = () => {
          }
     }
 
-    // Close menu if clicking background (or anything else really, unless handled specifically)
+    // Close menu if clicking background
     if (state.openVertexMenuId) {
         dispatch({ type: 'CLOSE_VERTEX_MENU', payload: undefined });
     }
@@ -113,6 +166,7 @@ export const Canvas: React.FC = () => {
     }
 
     if (activePointers.current.size === 2) {
+        cancelLongPress(); // Cancel any pending long press
         // Pinch Logic
         const points = Array.from(activePointers.current.values()) as { x: number; y: number }[];
         const p1 = points[0];
@@ -156,6 +210,7 @@ export const Canvas: React.FC = () => {
         const dist = Math.hypot(e.clientX - dragStartPosRef.current.x, e.clientY - dragStartPosRef.current.y);
         if (dist > 5) {
             hasMovedRef.current = true;
+            cancelLongPress(); // Cancel long press if moved
         }
     }
 
@@ -289,6 +344,7 @@ export const Canvas: React.FC = () => {
   const handlePointerUp = (e: React.PointerEvent) => {
     svgRef.current?.releasePointerCapture(e.pointerId);
     activePointers.current.delete(e.pointerId);
+    cancelLongPress();
 
     if (draggedVertexRef.current) {
         if (!hasMovedRef.current && dragStartWasSelectedRef.current) {
@@ -298,7 +354,13 @@ export const Canvas: React.FC = () => {
     } 
     else if (draggedPolygonRef.current) {
         if (!hasMovedRef.current) {
-             // If we clicked but didn't drag, we ensure it is selected (handled in onPointerDown already)
+             // Clicked but didn't drag
+             // If long press triggered, we already handled selection
+             if (!longPressTriggeredRef.current) {
+                  // Normal Click: Select single polygon or toggle if ctrl
+                  const isCtrl = e.ctrlKey || e.metaKey;
+                  dispatch({ type: 'SELECT_POLYGON', payload: { id: draggedPolygonRef.current, multi: isCtrl } });
+             }
         }
         draggedPolygonRef.current = null;
     }
@@ -307,7 +369,7 @@ export const Canvas: React.FC = () => {
     }
     else if (interactionTypeRef.current === 'background' && !state.isDrawingMode) {
         // Only deselect if we clicked background AND didn't pan significantly
-        if (!hasMovedRef.current) {
+        if (!hasMovedRef.current && e.button !== 2) { 
              dispatch({ type: 'SELECT_EDGE', payload: null });
              // Only switch to overview if we are NOT in focused mode
              if (!state.isFocused) {
@@ -319,6 +381,7 @@ export const Canvas: React.FC = () => {
     // Reset interaction state
     interactionTypeRef.current = null;
     dragStartPosRef.current = null;
+    longPressTriggeredRef.current = false;
     
     if (activePointers.current.size < 2) {
         pinchStartInfo.current = null;
@@ -348,6 +411,7 @@ export const Canvas: React.FC = () => {
       onPointerUp={handlePointerUp}
       onPointerLeave={handlePointerUp}
       onWheel={handleWheel}
+      onContextMenu={(e) => handleContextMenu(e, 'CANVAS')}
     >
         <defs>
             <pattern id="grid" width="50" height="50" patternUnits="userSpaceOnUse">
@@ -363,17 +427,17 @@ export const Canvas: React.FC = () => {
         >
             {/* EXISTING POLYGONS */}
             {visiblePolygons.map((poly) => {
-                const isSelected = state.selectedPolygonId === poly.id;
+                const isSelected = state.selectedPolygonIds.includes(poly.id);
                 // isDimmed logic: If in Join Mode, dim everyone EXCEPT selected AND Locked (candidates)
-                const isCandidate = state.isJoinMode && poly.isLocked && poly.id !== state.selectedPolygonId;
+                const isCandidate = state.isJoinMode && poly.isLocked && !state.selectedPolygonIds.includes(poly.id);
                 
-                const isDimmed = (state.isJoinMode && poly.id !== state.selectedPolygonId && !isCandidate) || 
+                const isDimmed = (state.isJoinMode && !state.selectedPolygonIds.includes(poly.id) && !isCandidate) || 
                                  state.isDrawingMode || 
                                  (state.isFocused && !isSelected); 
                 
-                // Rotation Handle Position (Above Topmost Vertex)
+                // Rotation Handle Position (Above Topmost Vertex) - Only show if single selection
                 let rotationHandle = null;
-                if (isSelected && !state.isJoinMode && !state.isDrawingMode) {
+                if (isSelected && state.selectedPolygonIds.length === 1 && !state.isJoinMode && !state.isDrawingMode) {
                     const topVertex = poly.vertices.reduce((prev, curr) => curr.y < prev.y ? curr : prev, poly.vertices[0]);
                     const handleY = topVertex.y - (60 / state.zoomLevel);
                     
@@ -409,11 +473,15 @@ export const Canvas: React.FC = () => {
                         stroke="none"
                         className={isSelected ? "cursor-move" : ""}
                         pointerEvents="all" // Allow clicking transparent fill to select/drag
+                        onContextMenu={(e) => handleContextMenu(e, 'POLYGON', poly.id)}
                         onPointerDown={(e) => {
                             if (state.isDrawingMode || state.isJoinMode) return;
                             interactionTypeRef.current = 'polygon';
-                            dispatch({ type: 'SELECT_POLYGON', payload: poly.id });
                             
+                            // Start Long Press Timer
+                            startLongPress(poly.id, 'polygon');
+
+                            // Don't select immediately to allow for drag or click distinction
                             draggedPolygonRef.current = poly.id;
                             dragStartPosRef.current = { x: e.clientX, y: e.clientY };
                             setLastPointer({ x: e.clientX, y: e.clientY });
@@ -504,8 +572,16 @@ export const Canvas: React.FC = () => {
                                onPointerDown={(e) => {
                                    if (state.isDrawingMode) return;
                                    interactionTypeRef.current = 'edge';
-                                   dispatch({ type: 'SELECT_EDGE', payload: edge.id });
+                                   
+                                   startLongPress(edge.id, 'edge');
+
+                                   // Delay select to handle click vs longpress
+                                   if (!longPressTriggeredRef.current) {
+                                       const isCtrl = e.ctrlKey || e.metaKey;
+                                       dispatch({ type: 'SELECT_EDGE', payload: { edgeId: edge.id, multi: isCtrl } });
+                                   }
                                }}
+                               onContextMenu={(e) => handleContextMenu(e, 'EDGE', edge.id)}
                                className={state.isDrawingMode ? '' : 'cursor-pointer'}
                             >
                                 {/* Hit Area */}
@@ -610,6 +686,7 @@ export const Canvas: React.FC = () => {
 
                         return (
                             <g key={vertex.id} 
+                               onContextMenu={(e) => handleContextMenu(e, 'VERTEX', vertex.id)}
                                onPointerDown={(e) => {
                                    if (state.isJoinMode || state.isDrawingMode) return; 
                                    
