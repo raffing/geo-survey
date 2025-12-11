@@ -29,6 +29,7 @@ export const Canvas: React.FC = () => {
   
   const dragStartPosRef = useRef<{x: number, y: number} | null>(null);
   const dragStartWasSelectedRef = useRef<boolean>(false);
+  const dragLockedRef = useRef<boolean>(false); // New: Prevents dragging if locked, but allows selection
   const hasMovedRef = useRef<boolean>(false);
   const hasSnapshotRef = useRef<boolean>(false);
 
@@ -94,17 +95,22 @@ export const Canvas: React.FC = () => {
       });
   };
 
-  const startLongPress = (id: string, type: 'polygon' | 'edge') => {
+  const startLongPress = (id: string, type: 'POLYGON' | 'EDGE', clientX: number, clientY: number) => {
       longPressTriggeredRef.current = false;
       if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
       
       longPressTimerRef.current = window.setTimeout(() => {
           longPressTriggeredRef.current = true;
-          if (type === 'polygon') {
-               dispatch({ type: 'SELECT_POLYGON', payload: { id, multi: true } });
-          } else if (type === 'edge') {
-               dispatch({ type: 'SELECT_EDGE', payload: { edgeId: id, multi: true } });
-          }
+          // Trigger context menu instead of just select
+          dispatch({ 
+            type: 'OPEN_CONTEXT_MENU', 
+            payload: { 
+                x: clientX, 
+                y: clientY, 
+                type: type, 
+                targetId: id 
+            } 
+          });
           // Haptic feedback if available
           if (navigator.vibrate) navigator.vibrate(50);
       }, 500); // 500ms for long press
@@ -138,12 +144,17 @@ export const Canvas: React.FC = () => {
     if (!interactionTypeRef.current) {
          if (e.target === svgRef.current || (e.target as HTMLElement).id === 'grid-bg') {
              interactionTypeRef.current = 'background';
+             // Long press on canvas?
+             startLongPress('', 'CANVAS' as any, e.clientX, e.clientY);
          }
     }
 
     // Close menu if clicking background
     if (state.openVertexMenuId) {
-        dispatch({ type: 'CLOSE_VERTEX_MENU', payload: undefined });
+        // Only close if we are not clicking a vertex
+        if (interactionTypeRef.current !== 'vertex') {
+             dispatch({ type: 'CLOSE_VERTEX_MENU', payload: undefined });
+        }
     }
 
     if (state.isDrawingMode) {
@@ -266,6 +277,9 @@ export const Canvas: React.FC = () => {
 
     // Vertex Drag
     if (draggedVertexRef.current && activePointers.current.size === 1) {
+        // Check locked status
+        if (dragLockedRef.current) return;
+
         if (hasMovedRef.current && !hasSnapshotRef.current) {
             dispatch({ type: 'CAPTURE_SNAPSHOT', payload: undefined });
             hasSnapshotRef.current = true;
@@ -312,7 +326,6 @@ export const Canvas: React.FC = () => {
              const newAngle = Math.atan2(point.y - cy, point.x - cx);
              
              // Calculate delta from last frame (or keep track of absolute)
-             // We'll use delta from the internal ref
              const delta = newAngle - rotatingPolygonRef.current.currentAngle;
              rotatingPolygonRef.current.currentAngle = newAngle;
 
@@ -346,6 +359,18 @@ export const Canvas: React.FC = () => {
     activePointers.current.delete(e.pointerId);
     cancelLongPress();
 
+    // Critical: If long press was triggered, abort any "click" logic (selection/toggle)
+    if (longPressTriggeredRef.current) {
+        // Reset and return
+        draggedVertexRef.current = null;
+        draggedPolygonRef.current = null;
+        interactionTypeRef.current = null;
+        dragStartPosRef.current = null;
+        longPressTriggeredRef.current = false;
+        setIsPanning(false);
+        return;
+    }
+
     if (draggedVertexRef.current) {
         if (!hasMovedRef.current && dragStartWasSelectedRef.current) {
             dispatch({ type: 'TOGGLE_VERTEX_SELECTION', payload: draggedVertexRef.current });
@@ -354,13 +379,9 @@ export const Canvas: React.FC = () => {
     } 
     else if (draggedPolygonRef.current) {
         if (!hasMovedRef.current) {
-             // Clicked but didn't drag
-             // If long press triggered, we already handled selection
-             if (!longPressTriggeredRef.current) {
-                  // Normal Click: Select single polygon or toggle if ctrl
-                  const isCtrl = e.ctrlKey || e.metaKey;
-                  dispatch({ type: 'SELECT_POLYGON', payload: { id: draggedPolygonRef.current, multi: isCtrl } });
-             }
+             // Normal Click: Select single polygon or toggle if ctrl
+             const isCtrl = e.ctrlKey || e.metaKey;
+             dispatch({ type: 'SELECT_POLYGON', payload: { id: draggedPolygonRef.current, multi: isCtrl } });
         }
         draggedPolygonRef.current = null;
     }
@@ -368,10 +389,8 @@ export const Canvas: React.FC = () => {
         rotatingPolygonRef.current = null;
     }
     else if (interactionTypeRef.current === 'background' && !state.isDrawingMode) {
-        // Only deselect if we clicked background AND didn't pan significantly
         if (!hasMovedRef.current && e.button !== 2) { 
              dispatch({ type: 'SELECT_EDGE', payload: null });
-             // Only switch to overview if we are NOT in focused mode
              if (!state.isFocused) {
                  dispatch({ type: 'SELECT_POLYGON', payload: null });
              }
@@ -382,6 +401,7 @@ export const Canvas: React.FC = () => {
     interactionTypeRef.current = null;
     dragStartPosRef.current = null;
     longPressTriggeredRef.current = false;
+    dragLockedRef.current = false;
     
     if (activePointers.current.size < 2) {
         pinchStartInfo.current = null;
@@ -479,7 +499,7 @@ export const Canvas: React.FC = () => {
                             interactionTypeRef.current = 'polygon';
                             
                             // Start Long Press Timer
-                            startLongPress(poly.id, 'polygon');
+                            startLongPress(poly.id, 'POLYGON', e.clientX, e.clientY);
 
                             // Don't select immediately to allow for drag or click distinction
                             draggedPolygonRef.current = poly.id;
@@ -546,15 +566,18 @@ export const Canvas: React.FC = () => {
                         const isDiagonal = edge.type === EdgeType.DIAGONAL;
                         const isJoined = !!edge.linkedEdgeId;
 
-                        const strokeColor = isEdgeSelected 
-                            ? '#38bdf8' 
-                            : (isJoined 
-                                ? '#a855f7' // Purple-500
-                                : (isConnectedToSelected 
-                                    ? '#7dd3fc' 
-                                    : (isDiagonal 
-                                        ? (state.theme === 'dark' ? '#475569' : '#94a3b8') 
-                                        : (state.theme === 'dark' ? '#94a3b8' : '#64748b'))));
+                        const isDoor = edge.feature === 'door';
+                        const isWindow = edge.feature === 'window';
+
+                        // Default Colors
+                        let strokeColor = state.theme === 'dark' ? '#94a3b8' : '#64748b'; // Default Wall
+
+                        if (isEdgeSelected) strokeColor = '#38bdf8';
+                        else if (isDoor) strokeColor = '#d97706'; // Amber-600 (Door)
+                        else if (isWindow) strokeColor = '#06b6d4'; // Cyan-500 (Window)
+                        else if (isJoined) strokeColor = '#a855f7'; // Purple-500
+                        else if (isConnectedToSelected) strokeColor = '#7dd3fc';
+                        else if (isDiagonal) strokeColor = state.theme === 'dark' ? '#475569' : '#94a3b8';
                         
                         const baseStroke = isPerimeter ? 3 : 1.5;
                         const strokeWidth = (isEdgeSelected ? 5 : baseStroke) / state.zoomLevel;
@@ -567,13 +590,139 @@ export const Canvas: React.FC = () => {
                         
                         const showThickness = isPerimeter && edge.thickness;
 
+                        // --- Feature Visualization Logic (Door / Window) ---
+                        let featureGraphic = null;
+                        let offsetPx = 0;
+                        let featureWidthPx = 0;
+                        let edgeLengthPx = 0;
+                        
+                        if (isPerimeter && (isDoor || isWindow)) {
+                            const dx = end.x - start.x;
+                            const dy = end.y - start.y;
+                            const angleDeg = Math.atan2(dy, dx) * 180 / Math.PI;
+                            
+                            // Dimensions in Pixels
+                            edgeLengthPx = edge.length * 100; // Total geometric length
+                            const featureWidthM = edge.featureWidth || (isDoor ? 0.8 : 1.2); // Default 0.8m / 1.2m
+                            
+                            // Clamp width to length for visual sanity
+                            const visibleFeatureWidthM = Math.min(featureWidthM, edge.length);
+                            featureWidthPx = visibleFeatureWidthM * 100;
+                            
+                            // Calculate Offset
+                            if (edge.featureDistance !== undefined) {
+                                offsetPx = edge.featureDistance * 100;
+                            } else {
+                                // Default: Center
+                                offsetPx = (edgeLengthPx - featureWidthPx) / 2;
+                            }
+
+                            // Thickness in pixels
+                            const thickPx = edge.thickness || 10;
+                            
+                            // Transform: Start at 'start' vertex, rotate by angle, then shift by offset
+                            featureGraphic = (
+                                <g transform={`translate(${start.x}, ${start.y}) rotate(${angleDeg})`}>
+                                     <g transform={`translate(${offsetPx}, 0)`}>
+                                        {isWindow && (
+                                            <g>
+                                                {/* Window Glass Block */}
+                                                <rect 
+                                                    x={0} 
+                                                    y={-thickPx/2} 
+                                                    width={featureWidthPx} 
+                                                    height={thickPx} 
+                                                    fill="white" 
+                                                    stroke="#06b6d4" 
+                                                    strokeWidth={2/state.zoomLevel} 
+                                                />
+                                                {/* Center Line (Glass pane) */}
+                                                <line x1={0} y1={0} x2={featureWidthPx} y2={0} stroke="#06b6d4" strokeWidth={1/state.zoomLevel} />
+                                            </g>
+                                        )}
+                                        {isDoor && (
+                                            <g>
+                                                {/* Door Swing Arc (Dotted) */}
+                                                <path 
+                                                    d={`M ${featureWidthPx},0 A ${featureWidthPx},${featureWidthPx} 0 0,1 ${featureWidthPx * 0.707},${featureWidthPx * 0.707}`} 
+                                                    fill="none" 
+                                                    stroke="#d97706" 
+                                                    strokeWidth={1/state.zoomLevel}
+                                                    strokeDasharray="4,2" 
+                                                />
+
+                                                {/* Door Leaf */}
+                                                <line 
+                                                    x1={0} y1={0} 
+                                                    x2={featureWidthPx * 0.707} y2={featureWidthPx * 0.707} 
+                                                    stroke="#d97706" 
+                                                    strokeWidth={thickPx/2} 
+                                                />
+                                                {/* Jambs */}
+                                                <rect x={-2/state.zoomLevel} y={-thickPx/2} width={4/state.zoomLevel} height={thickPx} fill="#d97706" />
+                                                <rect x={featureWidthPx - 2/state.zoomLevel} y={-thickPx/2} width={4/state.zoomLevel} height={thickPx} fill="#d97706" />
+                                            </g>
+                                        )}
+                                     </g>
+                                </g>
+                            );
+                        }
+
+                        // Wall Rendering Logic
+                        const renderWall = () => {
+                             if (isPerimeter && (isDoor || isWindow)) {
+                                 // Render two segments of wall: Start -> Feature Start, Feature End -> End
+                                 const dx = end.x - start.x;
+                                 const dy = end.y - start.y;
+                                 const angleDeg = Math.atan2(dy, dx) * 180 / Math.PI;
+
+                                 return (
+                                     <g transform={`translate(${start.x}, ${start.y}) rotate(${angleDeg})`}>
+                                         {/* Segment 1 */}
+                                         {offsetPx > 0 && (
+                                            <line
+                                                x1={0} y1={0}
+                                                x2={offsetPx} y2={0}
+                                                stroke={strokeColor}
+                                                strokeWidth={strokeWidth}
+                                                strokeLinecap="butt" // Butt cap so it aligns cleanly with feature
+                                            />
+                                         )}
+                                         {/* Segment 2 */}
+                                         {(offsetPx + featureWidthPx) < edgeLengthPx && (
+                                             <line
+                                                x1={offsetPx + featureWidthPx} y1={0}
+                                                x2={edgeLengthPx} y2={0}
+                                                stroke={strokeColor}
+                                                strokeWidth={strokeWidth}
+                                                strokeLinecap="butt"
+                                             />
+                                         )}
+                                     </g>
+                                 );
+                             } else {
+                                 // Standard full line
+                                 return (
+                                     <line
+                                        x1={start.x} y1={start.y}
+                                        x2={end.x} y2={end.y}
+                                        stroke={strokeColor}
+                                        strokeWidth={strokeWidth}
+                                        strokeDasharray={isDiagonal ? "5,5" : "0"}
+                                        strokeLinecap="round"
+                                        pointerEvents="none"
+                                    />
+                                 );
+                             }
+                        };
+
                         return (
                             <g key={edge.id} 
                                onPointerDown={(e) => {
                                    if (state.isDrawingMode) return;
                                    interactionTypeRef.current = 'edge';
                                    
-                                   startLongPress(edge.id, 'edge');
+                                   startLongPress(edge.id, 'EDGE', e.clientX, e.clientY);
 
                                    // Delay select to handle click vs longpress
                                    if (!longPressTriggeredRef.current) {
@@ -593,16 +742,11 @@ export const Canvas: React.FC = () => {
                                     strokeLinecap="round"
                                 />
 
-                                {/* Visual Line */}
-                                <line
-                                    x1={start.x} y1={start.y}
-                                    x2={end.x} y2={end.y}
-                                    stroke={strokeColor}
-                                    strokeWidth={strokeWidth}
-                                    strokeDasharray={isDiagonal ? "5,5" : "0"}
-                                    strokeLinecap="round"
-                                    pointerEvents="none"
-                                />
+                                {/* Wall Line (Split or Full) */}
+                                {renderWall()}
+
+                                {/* Feature Visualization (Underlay/Overlay) */}
+                                {featureGraphic}
                                 
                                 <g transform={`rotate(${-rotationDeg}, ${midX}, ${midY})`} pointerEvents="none">
                                     <rect 
@@ -611,7 +755,7 @@ export const Canvas: React.FC = () => {
                                         width={showThickness ? 52 : 44} 
                                         height={showThickness ? 36 : 24} 
                                         rx="4"
-                                        fill={isEdgeSelected ? '#0ea5e9' : (isJoined ? '#7e22ce' : (isConnectedToSelected ? '#334155' : (state.theme === 'dark' ? '#1e293b' : '#f1f5f9')))} 
+                                        fill={isEdgeSelected ? '#0ea5e9' : (isDoor ? '#d97706' : (isWindow ? '#06b6d4' : (isJoined ? '#7e22ce' : (isConnectedToSelected ? '#334155' : (state.theme === 'dark' ? '#1e293b' : '#f1f5f9')))))} 
                                         opacity="0.95"
                                         stroke={isEdgeSelected ? 'white' : (isJoined ? '#d8b4fe' : (state.theme === 'light' ? '#cbd5e1' : 'none'))}
                                         strokeWidth={1}
@@ -621,7 +765,7 @@ export const Canvas: React.FC = () => {
                                         y={midY}
                                         dy={showThickness ? "-0.3em" : "0.3em"}
                                         textAnchor="middle"
-                                        fill={state.theme === 'dark' || isEdgeSelected || isJoined || isConnectedToSelected ? "white" : "#0f172a"}
+                                        fill={state.theme === 'dark' || isEdgeSelected || isJoined || isConnectedToSelected || isDoor || isWindow ? "white" : "#0f172a"}
                                         fontSize={12}
                                         fontWeight="bold"
                                     >
@@ -633,7 +777,7 @@ export const Canvas: React.FC = () => {
                                             y={midY}
                                             dy="1.0em"
                                             textAnchor="middle"
-                                            fill={isEdgeSelected ? "#e0f2fe" : "#94a3b8"}
+                                            fill={isEdgeSelected || isDoor || isWindow ? "#e0f2fe" : "#94a3b8"}
                                             fontSize={10}
                                         >
                                             w: {edge.thickness}cm
@@ -680,6 +824,21 @@ export const Canvas: React.FC = () => {
                                             <circle cx={dist/2} cy={0} r={2/state.zoomLevel} fill="#fbbf24" />
                                         </g>
                                     );
+                                } else {
+                                    angleMarker = (
+                                        <g transform={`translate(${vertex.x}, ${vertex.y})`} pointerEvents="none">
+                                            <text 
+                                                y={-dist - 5/state.zoomLevel} 
+                                                textAnchor="middle" 
+                                                fontSize={10/state.zoomLevel}
+                                                fill="#fbbf24"
+                                                fontWeight="bold"
+                                            >
+                                                {vertex.fixedAngle}°
+                                            </text>
+                                            <circle r={4/state.zoomLevel} stroke="#fbbf24" strokeWidth={1/state.zoomLevel} fill="none"/>
+                                        </g>
+                                    );
                                 }
                             }
                         }
@@ -690,25 +849,27 @@ export const Canvas: React.FC = () => {
                                onPointerDown={(e) => {
                                    if (state.isJoinMode || state.isDrawingMode) return; 
                                    
-                                   // Prevent drag if locked
+                                   interactionTypeRef.current = 'vertex';
+                                   
+                                   // Mark locked state for dragging
                                    if (isLocked) {
-                                       interactionTypeRef.current = 'vertex'; // Mark as vertex click but don't set drag ref
-                                       dispatch({ type: 'SHOW_MESSAGE', payload: { type: 'error', text: 'Shape is locked. Modify a length to unlock.'} });
-                                       return;
+                                       dragLockedRef.current = true;
+                                   } else {
+                                       dragLockedRef.current = false;
                                    }
 
-                                   interactionTypeRef.current = 'vertex';
                                    draggedVertexRef.current = vertex.id;
                                    dragStartPosRef.current = { x: e.clientX, y: e.clientY };
                                    dragStartWasSelectedRef.current = isVertexSelected;
                                    hasMovedRef.current = false;
                                    hasSnapshotRef.current = false;
                                    
+                                   // Select vertex immediately (to show menu), unless we are toggling off
                                    if (!isVertexSelected) {
                                        dispatch({ type: 'TOGGLE_VERTEX_SELECTION', payload: vertex.id });
                                    }
                                }}
-                               className={state.isDrawingMode ? "" : (isLocked ? "cursor-not-allowed" : "cursor-move")}
+                               className={state.isDrawingMode ? "" : (isLocked ? "cursor-pointer" : "cursor-move")} // Changed cursor-not-allowed to pointer to indicate clickability
                             >
                                 {angleMarker}
 

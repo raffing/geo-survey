@@ -2,6 +2,7 @@ import React from 'react';
 import { SurveyProvider, useSurvey } from './context/SurveyContext';
 import { Canvas } from './components/Canvas';
 import { Controls } from './components/Controls';
+import { AiAssistant } from './components/AiAssistant';
 
 const ThemedLayout: React.FC<React.PropsWithChildren> = ({ children }) => {
     const { state } = useSurvey();
@@ -18,6 +19,7 @@ const App = () => {
       <ThemedLayout>
         <Canvas />
         <Controls />
+        <AiAssistant />
       </ThemedLayout>
     </SurveyProvider>
   );

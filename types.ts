@@ -1,4 +1,5 @@
 
+
 export interface Point {
   x: number;
   y: number;
@@ -27,6 +28,9 @@ export interface Edge {
   thickness?: number; // Visual thickness to simulate walls (in world units, cm usually stored as number)
   linkedEdgeId?: string; // ID of an edge in another polygon this is joined to
   alignmentOffset?: number; // Distance (m) from center of target edge along the shared line
+  feature?: 'door' | 'window' | null; // New property for architectural features
+  featureWidth?: number; // Width of the feature in meters
+  featureDistance?: number; // Distance from startVertexId to the start of the feature (meters)
 }
 
 export interface Polygon {
@@ -69,6 +73,7 @@ export interface ContextMenuState {
 
 export interface AppState {
   theme: 'light' | 'dark'; // New theme state
+  isAiPanelOpen: boolean; // AI Assistant visibility
   polygons: Polygon[];
   selectedPolygonIds: string[]; // Replaced single ID with array for multi-select
   selectedEdgeIds: string[]; 
@@ -113,6 +118,7 @@ export interface AppState {
 
 export type Action =
   | { type: 'TOGGLE_THEME'; payload: void }
+  | { type: 'TOGGLE_AI_PANEL'; payload: void }
   | { type: 'ADD_POLYGON'; payload: Polygon }
   | { type: 'SELECT_POLYGON'; payload: string | null | { id: string | null; shouldFocus?: boolean; multi?: boolean } }
   | { type: 'SELECT_EDGE'; payload: string | null | { edgeId: string; multi: boolean } }
@@ -120,7 +126,7 @@ export type Action =
   | { type: 'TOGGLE_VERTEX_SELECTION'; payload: string } 
   | { type: 'OPEN_VERTEX_MENU'; payload: string }
   | { type: 'CLOSE_VERTEX_MENU'; payload: void }
-  | { type: 'SET_VERTEX_ANGLE'; payload: { vertexId: string; angle: number | undefined } }
+  | { type: 'SET_VERTEX_ANGLE'; payload: { vertexId: string; angle: number | undefined; shouldClose?: boolean } }
   | { type: 'DELETE_VERTEX'; payload: string }
   | { type: 'ADD_DIAGONAL'; payload: void } 
   | { type: 'DELETE_EDGE'; payload: string } 
@@ -128,6 +134,7 @@ export type Action =
   | { type: 'UPDATE_EDGE_LENGTH'; payload: { edgeId: string; length: number } }
   | { type: 'UPDATE_EDGE_THICKNESS'; payload: { edgeId: string; thickness: number } }
   | { type: 'UPDATE_EDGE_ALIGNMENT'; payload: { edgeId: string; offset: number } }
+  | { type: 'SET_EDGE_FEATURE'; payload: { edgeId: string; feature: 'door' | 'window' | null; width?: number; distance?: number } } 
   | { type: 'MOVE_VERTEX'; payload: { vertexId: string; x: number; y: number } }
   | { type: 'MOVE_POLYGON'; payload: { polygonId: string; dx: number; dy: number } }
   | { type: 'ROTATE_POLYGON'; payload: { polygonId: string; rotationDelta: number } }
@@ -142,8 +149,8 @@ export type Action =
   | { type: 'CAPTURE_SNAPSHOT'; payload: void }
   | { type: 'START_JOIN_MODE'; payload: string } 
   | { type: 'COMPLETE_JOIN'; payload: string }
-  | { type: 'JOIN_SELECTED_EDGES'; payload: void } // New Action
-  | { type: 'RESOLVE_JOIN_CONFLICT'; payload: number } // Payload is chosen thickness
+  | { type: 'JOIN_SELECTED_EDGES'; payload: void } 
+  | { type: 'RESOLVE_JOIN_CONFLICT'; payload: number } 
   | { type: 'CANCEL_JOIN_CONFLICT'; payload: void }
   | { type: 'START_DRAWING'; payload: void }
   | { type: 'ADD_DRAWING_POINT'; payload: Point }
@@ -152,7 +159,6 @@ export type Action =
   | { type: 'FINISH_DRAWING'; payload: string }
   | { type: 'IMPORT_DATA'; payload: Polygon[] }
   | { type: 'RESET_CANVAS'; payload: void }
-  // New Actions
   | { type: 'DUPLICATE_POLYGON'; payload: string | undefined }
   | { type: 'MIRROR_POLYGON'; payload: { axis: 'X' | 'Y' } }
   | { type: 'START_ALIGN_MODE'; payload: void }
@@ -160,6 +166,5 @@ export type Action =
   | { type: 'UPDATE_ALIGN_PARAMS'; payload: { offset?: number; dist?: number } }
   | { type: 'CONFIRM_ALIGNMENT'; payload: void }
   | { type: 'CANCEL_ALIGNMENT'; payload: void }
-  // Context Menu Actions
   | { type: 'OPEN_CONTEXT_MENU'; payload: ContextMenuState }
   | { type: 'CLOSE_CONTEXT_MENU'; payload: void };

@@ -4,6 +4,7 @@ import { solveGeometry, distance, checkConnectionStatus, alignPolygonToEdge, cal
 
 const initialState: AppState = {
   theme: 'light',
+  isAiPanelOpen: false,
   polygons: [],
   selectedPolygonIds: [],
   selectedEdgeIds: [],
@@ -142,6 +143,9 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
   switch (action.type) {
     case 'TOGGLE_THEME':
       return { ...state, theme: state.theme === 'dark' ? 'light' : 'dark' };
+
+    case 'TOGGLE_AI_PANEL':
+        return { ...state, isAiPanelOpen: !state.isAiPanelOpen };
 
     case 'UNDO': {
         if (state.past.length === 0) return state;
@@ -488,7 +492,8 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
             endVertexId: newVertex.id,
             length: parseFloat((dist1 / PIXELS_PER_METER).toFixed(2)),
             type: EdgeType.PERIMETER,
-            thickness: edge.thickness
+            thickness: edge.thickness,
+            feature: edge.feature // Preserve feature style if needed, or reset. Let's reset for split.
         };
 
         const edge2: Edge = {
@@ -623,7 +628,7 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
     }
 
     case 'SET_VERTEX_ANGLE': {
-        const { vertexId, angle } = action.payload;
+        const { vertexId, angle, shouldClose } = action.payload;
         const poly = state.polygons.find(p => p.vertices.some(v => v.id === vertexId));
         if (!poly) return state;
 
@@ -646,13 +651,15 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
 
         const updatedPoly = { ...poly, vertices: newVertices, edges: newEdges, isLocked: false };
         const newPolygons = state.polygons.map(p => p.id === poly.id ? updatedPoly : p);
+        
+        const closeMenu = shouldClose !== undefined ? shouldClose : true;
 
         return {
             ...withHistory(state),
             polygons: newPolygons,
             solverMsg: null,
-            openVertexMenuId: null, // Close menu after setting
-            contextMenu: null
+            openVertexMenuId: closeMenu ? null : state.openVertexMenuId, // Only close if requested (default true)
+            contextMenu: closeMenu ? null : state.contextMenu
         };
     }
 
@@ -1060,6 +1067,54 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
         return { ...withHistory(state), polygons: newPolygons };
     }
 
+    case 'SET_EDGE_FEATURE': {
+        const { edgeId, feature, width, distance } = action.payload;
+        const poly = state.polygons.find(p => p.edges.some(e => e.id === edgeId));
+        if (!poly) return state;
+
+        const newPolygons = state.polygons.map(p => {
+            if (p.id !== poly.id) return p;
+            return {
+                ...p,
+                edges: p.edges.map(e => {
+                    if (e.id !== edgeId) return e;
+                    
+                    // Logic to set width, defaulting if not provided
+                    let newWidth = width;
+                    // If switching to a feature and width is not provided, use default
+                    if (feature && !newWidth && newWidth !== 0) {
+                        if (feature === 'door') newWidth = 0.8;
+                        if (feature === 'window') newWidth = 1.2;
+                    }
+                    else if (feature && newWidth === undefined) {
+                         // Preserve existing if set
+                         if (e.featureWidth) newWidth = e.featureWidth;
+                    }
+
+                    // Distance logic
+                    let newDistance = distance;
+                    if (newDistance === undefined) {
+                        // If we already have a distance, keep it (unless we switched feature types or something, but usually keep)
+                        if (e.featureDistance !== undefined) {
+                            newDistance = e.featureDistance;
+                        } else {
+                            // Default to center if no distance set
+                            newDistance = (e.length - (newWidth || 0)) / 2;
+                        }
+                    }
+                    
+                    return { ...e, feature, featureWidth: newWidth, featureDistance: newDistance };
+                })
+            };
+        });
+
+        return { 
+            ...withHistory(state), 
+            polygons: newPolygons,
+            contextMenu: null // Close context menu
+        };
+    }
+
     case 'MOVE_VERTEX': {
         const { vertexId, x, y } = action.payload;
         const targetPolyIndex = state.polygons.findIndex(p => p.vertices.some(v => v.id === vertexId));
@@ -1083,7 +1138,7 @@ const surveyReducer = (state: AppState, action: Action): AppState => {
             ...state, 
             polygons: newPolygons, 
             isDragging: true, 
-            solverMsg: null,
+            solverMsg: null, 
             openVertexMenuId: null 
         };
     }
